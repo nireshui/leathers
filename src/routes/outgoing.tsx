@@ -1,32 +1,26 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import {
-  Plus,
-  Search,
-  MoreVertical,
+  AlertCircle,
+  AlertTriangle,
+  ArrowUpFromLine,
+  CheckCircle2,
+  Clock,
   Eye,
   FilterX,
   Package,
-  CheckCircle2,
-  Clock,
-  XCircle,
+  Plus,
+  Search,
+  ShoppingCart,
   Trash2,
-  AlertCircle,
+  XCircle,
 } from "lucide-react";
 import { AppLayout } from "../components/AppLayout";
 import {
-  INITIAL_INVENTORY_ITEMS,
-  INITIAL_OUTGOING_ENTRIES,
-  LOCATIONS,
-  OUTGOING_STATUSES,
-  PURPOSES,
-  type InventoryItem,
-  type Location,
-  type OutgoingEntry,
-  type OutgoingLineItem,
-  type OutgoingPurpose,
-  type OutgoingStatus,
-} from "../lib/inventoryData";
+  dispatchFinishedGoods,
+  useFactoryStore,
+} from "../lib/factoryStore";
+import { INITIAL_CUSTOMERS, LOCATIONS, type Location } from "../lib/inventoryData";
 import {
   Dialog,
   DialogContent,
@@ -35,1027 +29,401 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "../components/ui/dropdown-menu";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/outgoing")({
   head: () => ({
     meta: [
-      { title: "Outgoing Stock — Leather Factory" },
+      { title: "Outgoing / Dispatch — Leather Factory" },
       {
         name: "description",
         content:
-          "Record and track materials, hides, chemicals, and supplies leaving factory inventory for production or dispatch.",
+          "Manage customer dispatches of finished goods and raw material stock issues with clear purpose tracking.",
       },
     ],
   }),
   component: OutgoingPage,
 });
 
-/* -------------------------------- Badges -------------------------------- */
-
-function OutgoingStatusBadge({ status }: { status: OutgoingStatus }) {
-  const styles = {
-    Issued: "bg-success/10 text-success border-success/20",
-    Pending: "bg-warning/10 text-warning border-warning/20",
-    Cancelled: "bg-destructive/10 text-destructive border-destructive/20",
-  }[status];
-
-  const Icon = {
-    Issued: CheckCircle2,
-    Pending: Clock,
-    Cancelled: XCircle,
-  }[status];
-
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-sm border px-2 py-0.5 text-[11px] font-medium leading-4 ${styles}`}
-    >
-      <Icon size={12} strokeWidth={2} />
-      {status}
-    </span>
-  );
-}
-
-/* -------------------------------- Main Page ------------------------------- */
+type DispatchType = "Finished Product" | "Raw Material / Component";
 
 function OutgoingPage() {
-  const [entries, setEntries] = useState<OutgoingEntry[]>(INITIAL_OUTGOING_ENTRIES);
-  const [inventory, setInventory] = useState<InventoryItem[]>(INITIAL_INVENTORY_ITEMS);
+  const store = useFactoryStore();
 
-  // Filters
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedPurpose, setSelectedPurpose] = useState<string>("all");
-  const [selectedStatus, setSelectedStatus] = useState<string>("all");
-  const [selectedDate, setSelectedDate] = useState<string>("all");
+  const [isNewDispatchOpen, setIsNewDispatchOpen] = useState(false);
 
-  // Modal States
-  const [isRecordOpen, setIsRecordOpen] = useState(false);
-  const [viewingEntry, setViewingEntry] = useState<OutgoingEntry | null>(null);
+  // New Dispatch Form State
+  const [dispatchType, setDispatchType] = useState<DispatchType>("Finished Product");
+  const [customerName, setCustomerName] = useState(INITIAL_CUSTOMERS[0]?.customerName || "ABC Leather Works");
+  const [selectedFpId, setSelectedFpId] = useState(store.finishedProducts[0]?.id || "");
+  const [selectedRmId, setSelectedRmId] = useState(store.rawMaterials[0]?.id || "");
+  const [quantity, setQuantity] = useState("10");
+  const [referenceNumber, setReferenceNumber] = useState(`SO-${Math.floor(10000 + Math.random() * 90000)}`);
+  const [purpose, setPurpose] = useState<string>("Customer Order");
+  const [issuedBy, setIssuedBy] = useState("R. Geetha");
+  const [notes, setNotes] = useState("");
 
-  // Record Form Header State
-  const [recordHeader, setRecordHeader] = useState({
-    issueNumber: `OUT-00${90 + entries.length - INITIAL_OUTGOING_ENTRIES.length}`,
-    date: "17 Sep 2026",
-    destination: "Production",
-    purpose: "Production" as OutgoingPurpose,
-    warehouse: LOCATIONS[0] as Location,
-    issuedBy: "R. Geetha",
-    referenceNumber: "WO-2026-445",
-    notes: "",
-  });
+  const selectedFpItem = store.finishedProducts.find((f) => f.id === selectedFpId);
+  const selectedRmItem = store.rawMaterials.find((m) => m.id === selectedRmId);
 
-  // Record Form Items State
-  const [lineItems, setLineItems] = useState<OutgoingLineItem[]>([
-    {
-      itemId: INITIAL_INVENTORY_ITEMS[0].id,
-      itemCode: INITIAL_INVENTORY_ITEMS[0].itemCode,
-      itemName: INITIAL_INVENTORY_ITEMS[0].itemName,
-      availableStock: INITIAL_INVENTORY_ITEMS[0].currentStock,
-      quantity: 100,
-      unit: INITIAL_INVENTORY_ITEMS[0].unit,
-      rate: 110,
-      total: 11000,
-    },
-  ]);
+  // Available stock check error message
+  const availableStock = dispatchType === "Finished Product"
+    ? (selectedFpItem?.currentStock || 0)
+    : (selectedRmItem?.currentStock || 0);
 
-  // Dynamic calculation for record totals
-  const totalQuantity = useMemo(() => {
-    return lineItems.reduce((acc, item) => acc + (Number(item.quantity) || 0), 0);
-  }, [lineItems]);
+  const requestedQty = parseFloat(quantity) || 0;
+  const isInsufficientStock = requestedQty > availableStock;
 
-  const totalValue = useMemo(() => {
-    return lineItems.reduce((acc, item) => acc + (item.total || 0), 0);
-  }, [lineItems]);
-
-  // Validation: Check if any item quantity exceeds available stock
-  const hasInsufficientStock = useMemo(() => {
-    return lineItems.some(
-      (item) =>
-        (Number(item.quantity) || 0) > item.availableStock || (Number(item.quantity) || 0) <= 0,
-    );
-  }, [lineItems]);
-
-  // Dynamic Summary Cards Metrics
-  const summary = useMemo(() => {
-    // Exact requested base numbers: Today 420 units, Month 8,250 units, Pending 2
-    let todayQty = 420;
-    let monthQty = 8250;
-    let pendingCount = 2;
-
-    entries.forEach((e, idx) => {
-      if (idx >= INITIAL_OUTGOING_ENTRIES.length) {
-        if (e.status === "Pending") pendingCount++;
-        if (e.status === "Issued") {
-          monthQty += e.totalQuantity;
-          if (e.date.includes("17 Sep")) todayQty += e.totalQuantity;
-        }
-      }
-    });
-
-    return {
-      todayOutgoing: todayQty,
-      thisMonth: monthQty,
-      pendingEntries: pendingCount,
-    };
-  }, [entries]);
-
-  // Filtered entries for table
-  const filteredEntries = useMemo(() => {
-    return entries.filter((e) => {
-      const q = searchQuery.trim().toLowerCase();
-      const matchesSearch =
-        !q ||
-        e.issueNumber.toLowerCase().includes(q) ||
-        e.destination.toLowerCase().includes(q) ||
-        e.issuedBy.toLowerCase().includes(q) ||
-        (e.referenceNumber && e.referenceNumber.toLowerCase().includes(q)) ||
-        e.items.some(
-          (item) =>
-            item.itemName.toLowerCase().includes(q) || item.itemCode.toLowerCase().includes(q),
-        );
-
-      const matchesPurpose = selectedPurpose === "all" || e.purpose === selectedPurpose;
-      const matchesStatus = selectedStatus === "all" || e.status === selectedStatus;
-      const matchesDate =
-        selectedDate === "all" ||
-        (selectedDate === "today" && e.date.includes("17 Sep")) ||
-        (selectedDate === "yesterday" && e.date.includes("16 Sep"));
-
-      return matchesSearch && matchesPurpose && matchesStatus && matchesDate;
-    });
-  }, [entries, searchQuery, selectedPurpose, selectedStatus, selectedDate]);
-
-  const hasActiveFilters =
-    searchQuery.trim() !== "" ||
-    selectedPurpose !== "all" ||
-    selectedStatus !== "all" ||
-    selectedDate !== "all";
-
-  const clearFilters = () => {
-    setSearchQuery("");
-    setSelectedPurpose("all");
-    setSelectedStatus("all");
-    setSelectedDate("all");
-  };
-
-  // Add Item to Record Form
-  const handleAddLineItem = () => {
-    const defaultItem = inventory[0] || INITIAL_INVENTORY_ITEMS[0];
-    setLineItems((prev) => [
-      ...prev,
-      {
-        itemId: defaultItem.id,
-        itemCode: defaultItem.itemCode,
-        itemName: defaultItem.itemName,
-        availableStock: defaultItem.currentStock,
-        quantity: Math.min(50, defaultItem.currentStock),
-        unit: defaultItem.unit,
-        rate: 100,
-        total: Math.min(50, defaultItem.currentStock) * 100,
-      },
-    ]);
-  };
-
-  // Remove Item from Record Form
-  const handleRemoveLineItem = (index: number) => {
-    if (lineItems.length === 1) {
-      toast.error("At least one line item is required.");
-      return;
-    }
-    setLineItems((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  // Update line item property
-  const handleLineItemChange = (
-    index: number,
-    field: keyof OutgoingLineItem,
-    value: string | number,
-  ) => {
-    setLineItems((prev) =>
-      prev.map((item, i) => {
-        if (i !== index) return item;
-
-        if (field === "itemId") {
-          const selectedInv = inventory.find((inv) => inv.id === value) || inventory[0];
-          const newQty = Math.min(item.quantity || 1, selectedInv.currentStock);
-          const newRate = item.rate || 100;
-          return {
-            ...item,
-            itemId: selectedInv.id,
-            itemCode: selectedInv.itemCode,
-            itemName: selectedInv.itemName,
-            availableStock: selectedInv.currentStock,
-            unit: selectedInv.unit,
-            quantity: newQty,
-            total: newQty * newRate,
-          };
-        }
-
-        const updated = { ...item, [field]: value };
-        if (field === "quantity" || field === "rate") {
-          const qty = Number(field === "quantity" ? value : item.quantity) || 0;
-          const rate = Number(field === "rate" ? value : item.rate) || 0;
-          updated.total = qty * rate;
-        }
-        return updated;
-      }),
-    );
-  };
-
-  // Save Record Handler
-  const handleSaveOutgoingSubmit = (e: React.FormEvent) => {
+  const handleDispatchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (hasInsufficientStock) {
-      toast.error("Insufficient stock available for one or more items.");
+    if (requestedQty <= 0) {
+      toast.error("Please enter a valid quantity.");
       return;
     }
 
-    if (!recordHeader.issueNumber || !recordHeader.destination) {
-      toast.error("Please fill in Issue Number and Destination.");
+    if (isInsufficientStock) {
+      toast.error(
+        `Insufficient finished product stock. Requested ${requestedQty}, but only ${availableStock} available in inventory.`
+      );
       return;
     }
 
-    const mainUnit = lineItems[0]?.unit || "Units";
+    if (dispatchType === "Finished Product") {
+      if (!selectedFpItem) return;
+      const res = dispatchFinishedGoods({
+        customerName,
+        sku: selectedFpItem.sku,
+        quantity: requestedQty,
+        referenceNumber,
+        issuedBy,
+        notes,
+      });
 
-    const newEntry: OutgoingEntry = {
-      id: `out-${Date.now()}`,
-      issueNumber: recordHeader.issueNumber,
-      date: recordHeader.date || "17 Sep 2026",
-      destination: recordHeader.destination.trim(),
-      purpose: recordHeader.purpose,
-      referenceNumber: recordHeader.referenceNumber.trim() || undefined,
-      warehouse: recordHeader.warehouse,
-      issuedBy: recordHeader.issuedBy.trim() || "R. Geetha",
-      itemCount: lineItems.length,
-      totalQuantity,
-      quantityDisplay: `${totalQuantity.toLocaleString()} ${mainUnit}`,
-      totalValue,
-      status: "Issued",
-      notes: recordHeader.notes.trim() || undefined,
-      items: lineItems,
-    };
-
-    // 1. Add new outgoing entry
-    setEntries((prev) => [newEntry, ...prev]);
-
-    // 2. Decrease corresponding inventory stock quantities
-    setInventory((prev) =>
-      prev.map((invItem) => {
-        const matchingLines = lineItems.filter((l) => l.itemId === invItem.id);
-        if (matchingLines.length > 0) {
-          const issuedQty = matchingLines.reduce((acc, l) => acc + (Number(l.quantity) || 0), 0);
-          const updatedStock = Math.max(0, invItem.currentStock - issuedQty);
-          return {
-            ...invItem,
-            currentStock: updatedStock,
-            lastUpdated: "Just now (Outgoing Issue)",
-          };
-        }
-        return invItem;
-      }),
-    );
-
-    setIsRecordOpen(false);
-    toast.success(`Outgoing entry ${newEntry.issueNumber} saved. Stock updated successfully.`);
-
-    // Reset Form
-    const nextIssueNum = `OUT-00${91 + entries.length - INITIAL_OUTGOING_ENTRIES.length}`;
-    setRecordHeader({
-      issueNumber: nextIssueNum,
-      date: "17 Sep 2026",
-      destination: "Production",
-      purpose: "Production",
-      warehouse: LOCATIONS[0] as Location,
-      issuedBy: "R. Geetha",
-      referenceNumber: "",
-      notes: "",
-    });
-    setLineItems([
-      {
-        itemId: inventory[0]?.id || "lf-001",
-        itemCode: inventory[0]?.itemCode || "LF-001",
-        itemName: inventory[0]?.itemName || "Full Grain Cow Leather",
-        availableStock: inventory[0]?.currentStock || 2450,
-        quantity: 100,
-        unit: inventory[0]?.unit || "Sq.ft",
-        rate: 110,
-        total: 11000,
-      },
-    ]);
+      if (res.success) {
+        toast.success(res.message);
+        setIsNewDispatchOpen(false);
+      } else {
+        toast.error(res.message);
+      }
+    } else {
+      // Raw Material / Component Issue
+      if (!selectedRmItem) return;
+      toast.success(
+        `Issued ${requestedQty} ${selectedRmItem.unit} of ${selectedRmItem.itemName} for ${purpose}`
+      );
+      setIsNewDispatchOpen(false);
+    }
   };
 
   return (
-    <AppLayout
-      headerTitle="Outgoing Stock"
-      headerRightContent={
-        <div className="flex items-center gap-3">
-          <label className="relative hidden sm:block">
-            <Search
-              size={14}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-            />
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search outgoing issue, destination…"
-              className="h-8 w-60 rounded-sm border border-input bg-background pl-8 pr-3 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/30 transition-all"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={() => setIsRecordOpen(true)}
-            className="inline-flex h-8 items-center gap-1.5 rounded-sm bg-primary px-3 text-[13px] font-medium text-primary-foreground shadow-xs hover:bg-primary/90 transition-colors"
-          >
-            <Plus size={15} strokeWidth={2} />
-            Record Outgoing
-          </button>
-        </div>
-      }
-    >
-      {/* 3 Summary Cards */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <div className="rounded-md border border-border bg-card px-4 py-3.5">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Today's Outgoing
+    <AppLayout headerTitle="Outgoing / Customer Dispatch">
+      {/* Header */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight text-foreground">
+            Dispatch & Outgoing Stock
+          </h1>
+          <p className="text-[13px] text-muted-foreground">
+            Customer order dispatches, finished product shipments, and raw material issues.
           </p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums leading-7 text-foreground">
-            {summary.todayOutgoing.toLocaleString()}{" "}
-            <span className="text-[13px] font-normal text-muted-foreground">units</span>
-          </p>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">Issued to production & orders</p>
         </div>
 
-        <div className="rounded-md border border-border bg-card px-4 py-3.5">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            This Month
+        <button
+          type="button"
+          onClick={() => setIsNewDispatchOpen(true)}
+          className="flex items-center gap-1.5 rounded-sm bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+        >
+          <Plus size={15} />
+          New Dispatch Order
+        </button>
+      </div>
+
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="rounded-md border border-border bg-card px-4 py-3">
+          <p className="text-[11px] font-medium uppercase text-muted-foreground">
+            Finished Goods Outgoing
           </p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums leading-7 text-foreground">
-            {summary.thisMonth.toLocaleString()}{" "}
-            <span className="text-[13px] font-normal text-muted-foreground">units</span>
+          <p className="mt-1 text-2xl font-bold tabular-nums text-foreground">
+            {store.stockMovements.filter((m) => m.type === "Outgoing").length}
           </p>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">Total stock dispatches</p>
+          <p className="text-[11px] text-muted-foreground">Recent customer dispatches</p>
         </div>
 
-        <div className="rounded-md border border-border bg-card px-4 py-3.5">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Pending Entries
+        <div className="rounded-md border border-border bg-card px-4 py-3">
+          <p className="text-[11px] font-medium uppercase text-muted-foreground">
+            Available Finished Goods
           </p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums leading-7 text-warning">
-            {summary.pendingEntries}
+          <p className="mt-1 text-2xl font-bold tabular-nums text-foreground">
+            {store.finishedProducts.reduce((a, b) => a + b.currentStock, 0)}{" "}
+            <span className="text-[13px] font-normal text-muted-foreground">pairs</span>
           </p>
-          <p className="mt-0.5 text-[11px] text-warning">Awaiting dispatch release</p>
+          <p className="text-[11px] text-muted-foreground">In stock across 5 SKUs</p>
+        </div>
+
+        <div className="rounded-md border border-border bg-card px-4 py-3">
+          <p className="text-[11px] font-medium uppercase text-muted-foreground">
+            Material Issues
+          </p>
+          <p className="mt-1 text-2xl font-bold tabular-nums text-foreground">
+            {store.stockMovements.filter((m) => m.type === "Material Issue").length}
+          </p>
+          <p className="text-[11px] text-muted-foreground">Raw leather issued to production</p>
+        </div>
+
+        <div className="rounded-md border border-border bg-card px-4 py-3">
+          <p className="text-[11px] font-medium uppercase text-muted-foreground">
+            Active Customers
+          </p>
+          <p className="mt-1 text-2xl font-bold tabular-nums text-foreground">
+            {INITIAL_CUSTOMERS.length}
+          </p>
+          <p className="text-[11px] text-muted-foreground">Registered buyers & distributors</p>
         </div>
       </div>
 
-      {/* Filter Row & Outgoing Table */}
-      <section className="rounded-md border border-border bg-card">
-        {/* Filters Header */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
-          <div className="flex flex-wrap items-center gap-2.5">
-            {/* Search Input */}
-            <div className="relative">
-              <Search
-                size={14}
-                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-              />
-              <input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search..."
-                className="h-8 w-44 rounded-sm border border-input bg-background pl-8 pr-3 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-              />
-            </div>
-
-            {/* Date Filter */}
-            <select
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-              className="h-8 rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-            >
-              <option value="all">All Dates</option>
-              <option value="today">Today (17 Sep)</option>
-              <option value="yesterday">Yesterday (16 Sep)</option>
-            </select>
-
-            {/* Purpose Filter */}
-            <select
-              value={selectedPurpose}
-              onChange={(e) => setSelectedPurpose(e.target.value)}
-              className="h-8 rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-            >
-              <option value="all">All Purposes</option>
-              {PURPOSES.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
-
-            {/* Status Filter */}
-            <select
-              value={selectedStatus}
-              onChange={(e) => setSelectedStatus(e.target.value)}
-              className="h-8 rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-            >
-              <option value="all">All Statuses</option>
-              {OUTGOING_STATUSES.map((st) => (
-                <option key={st} value={st}>
-                  {st}
-                </option>
-              ))}
-            </select>
-
-            {hasActiveFilters && (
-              <button
-                type="button"
-                onClick={clearFilters}
-                className="inline-flex h-8 items-center gap-1.5 rounded-sm px-2 text-[12px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-              >
-                <FilterX size={13} />
-                Clear
-              </button>
-            )}
-          </div>
-
-          <div className="text-[12px] text-muted-foreground">
-            Showing <span className="font-semibold text-foreground">{filteredEntries.length}</span>{" "}
-            entries
-          </div>
+      {/* SEARCH / FILTER */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="relative flex-1 max-w-sm">
+          <Search
+            size={14}
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
+          <input
+            type="search"
+            placeholder="Search dispatch ref, customer, item…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="h-8 w-full rounded-sm border border-input bg-background pl-8 pr-3 text-[13px] focus:outline-none focus:ring-2 focus:ring-ring/30"
+          />
         </div>
+      </div>
 
-        {/* Outgoing Stock Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-[13px]">
-            <thead>
-              <tr className="border-b border-border bg-muted/30 text-[11px] uppercase tracking-wide text-muted-foreground">
-                <th className="px-4 py-2.5 font-semibold">Issue No.</th>
-                <th className="px-4 py-2.5 font-semibold">Date</th>
-                <th className="px-4 py-2.5 font-semibold">Destination</th>
-                <th className="px-4 py-2.5 font-semibold">Purpose</th>
-                <th className="px-4 py-2.5 text-right font-semibold">Items</th>
-                <th className="px-4 py-2.5 text-right font-semibold">Total Qty</th>
-                <th className="px-4 py-2.5 font-semibold">Issued By</th>
-                <th className="px-4 py-2.5 font-semibold">Status</th>
-                <th className="px-4 py-2.5 text-right font-semibold">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredEntries.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">
-                    <div className="flex flex-col items-center justify-center gap-1.5">
-                      <Package size={24} className="text-muted-foreground/50" />
-                      <p className="text-[13px] font-medium">No outgoing entries found.</p>
-                      {hasActiveFilters && (
-                        <button
-                          type="button"
-                          onClick={clearFilters}
-                          className="mt-1 text-[12px] font-medium text-primary hover:underline"
-                        >
-                          Clear filters
-                        </button>
-                      )}
-                    </div>
+      {/* DISPATCH LEDGER TABLE */}
+      <div className="rounded-md border border-border bg-card overflow-hidden">
+        <table className="w-full text-[13px]">
+          <thead>
+            <tr className="border-b border-border bg-accent/20 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+              <th className="px-4 py-2.5 font-medium">Date</th>
+              <th className="px-4 py-2.5 font-medium">Reference #</th>
+              <th className="px-4 py-2.5 font-medium">Item / Product Dispatched</th>
+              <th className="px-4 py-2.5 font-medium">Category</th>
+              <th className="px-4 py-2.5 font-medium">Purpose / Customer</th>
+              <th className="px-4 py-2.5 text-right font-medium">Quantity</th>
+              <th className="px-4 py-2.5 font-medium">Location</th>
+              <th className="px-4 py-2.5 font-medium">Issued By</th>
+            </tr>
+          </thead>
+          <tbody>
+            {store.stockMovements
+              .filter((m) => m.type === "Outgoing" || m.type === "Material Issue")
+              .filter(
+                (m) =>
+                  !searchQuery ||
+                  m.itemName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                  m.reference.toLowerCase().includes(searchQuery.toLowerCase())
+              )
+              .map((mov) => (
+                <tr key={mov.id} className="border-b border-border hover:bg-accent/40">
+                  <td className="px-4 py-2.5 text-muted-foreground">{mov.date}</td>
+                  <td className="px-4 py-2.5 font-mono font-semibold text-foreground">
+                    {mov.reference}
                   </td>
+                  <td className="px-4 py-2.5 font-medium text-foreground">
+                    {mov.itemName}
+                    <span className="ml-1 text-[10px] text-muted-foreground">({mov.itemCode})</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{mov.category}</td>
+                  <td className="px-4 py-2.5 font-medium text-foreground">
+                    <span className="inline-flex items-center gap-1.5 rounded-sm bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                      {mov.type === "Outgoing" ? "Customer Order" : "Production Issue"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-right font-bold tabular-nums text-foreground">
+                    {mov.quantityDisplay}
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{mov.location}</td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{mov.user}</td>
                 </tr>
-              ) : (
-                filteredEntries.map((entry) => (
-                  <tr
-                    key={entry.id}
-                    className="border-b border-border last:border-0 hover:bg-accent/50 transition-colors"
-                  >
-                    <td className="whitespace-nowrap px-4 py-3 font-mono font-medium text-foreground">
-                      {entry.issueNumber}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
-                      {entry.date}
-                    </td>
-                    <td className="px-4 py-3 font-medium text-foreground">{entry.destination}</td>
-                    <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
-                      {entry.purpose}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-muted-foreground">
-                      {entry.itemCount}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right font-medium tabular-nums text-foreground">
-                      {entry.quantityDisplay}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
-                      {entry.issuedBy}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3">
-                      <OutgoingStatusBadge status={entry.status} />
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right">
-                      <div className="inline-flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setViewingEntry(entry)}
-                          title="View Details"
-                          className="rounded-sm p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-                        >
-                          <Eye size={14} />
-                        </button>
+              ))}
+          </tbody>
+        </table>
+      </div>
 
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <button
-                              type="button"
-                              className="rounded-sm p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-                            >
-                              <MoreVertical size={14} />
-                            </button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" className="w-40">
-                            <DropdownMenuItem onClick={() => setViewingEntry(entry)}>
-                              <Eye className="mr-2 size-3.5" /> View Voucher
-                            </DropdownMenuItem>
-
-                            {entry.status === "Pending" && (
-                              <DropdownMenuItem
-                                onClick={() => {
-                                  setEntries((prev) =>
-                                    prev.map((e) =>
-                                      e.id === entry.id ? { ...e, status: "Issued" } : e,
-                                    ),
-                                  );
-                                  toast.success(`Issue ${entry.issueNumber} marked as Issued.`);
-                                }}
-                              >
-                                <CheckCircle2 className="mr-2 size-3.5 text-success" /> Mark Issued
-                              </DropdownMenuItem>
-                            )}
-
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                              className="text-destructive focus:bg-destructive/10 focus:text-destructive"
-                              onClick={() => {
-                                setEntries((prev) => prev.filter((e) => e.id !== entry.id));
-                                toast.success(`Issue ${entry.issueNumber} removed.`);
-                              }}
-                            >
-                              Remove Entry
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* ------------------------ Record Outgoing Modal ----------------------- */}
-      <Dialog open={isRecordOpen} onOpenChange={setIsRecordOpen}>
-        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+      {/* NEW DISPATCH DIALOG */}
+      <Dialog open={isNewDispatchOpen} onOpenChange={setIsNewDispatchOpen}>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle className="text-base font-semibold text-foreground flex items-center justify-between">
-              <span>Record Outgoing Stock</span>
-              <span className="font-mono text-xs text-muted-foreground font-normal">
-                {recordHeader.issueNumber}
-              </span>
-            </DialogTitle>
-            <DialogDescription className="text-[13px]">
-              Record materials leaving inventory for production, orders, or internal transfer.
+            <DialogTitle>New Dispatch / Outgoing Order</DialogTitle>
+            <DialogDescription>
+              Record finished goods customer dispatch or raw material factory issue.
             </DialogDescription>
           </DialogHeader>
 
-          <form onSubmit={handleSaveOutgoingSubmit} className="space-y-4 py-2">
-            {/* Header Fields */}
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Issue Number *
+          <form onSubmit={handleDispatchSubmit} className="space-y-3 text-[13px]">
+            <div className="space-y-1">
+              <label className="text-[12px] font-medium">Dispatch Type</label>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 cursor-pointer text-[13px]">
+                  <input
+                    type="radio"
+                    name="dispatchType"
+                    checked={dispatchType === "Finished Product"}
+                    onChange={() => setDispatchType("Finished Product")}
+                  />
+                  <span>Finished Product (Customer Shipment)</span>
                 </label>
-                <input
-                  type="text"
-                  required
-                  value={recordHeader.issueNumber}
-                  onChange={(e) =>
-                    setRecordHeader({ ...recordHeader, issueNumber: e.target.value })
-                  }
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-muted px-2.5 text-[13px] font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Date *
+                <label className="flex items-center gap-2 cursor-pointer text-[13px]">
+                  <input
+                    type="radio"
+                    name="dispatchType"
+                    checked={dispatchType === "Raw Material / Component"}
+                    onChange={() => setDispatchType("Raw Material / Component")}
+                  />
+                  <span>Raw Material Issue</span>
                 </label>
-                <input
-                  type="text"
-                  required
-                  value={recordHeader.date}
-                  onChange={(e) => setRecordHeader({ ...recordHeader, date: e.target.value })}
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Destination *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Production Floor / Client"
-                  value={recordHeader.destination}
-                  onChange={(e) =>
-                    setRecordHeader({ ...recordHeader, destination: e.target.value })
-                  }
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Purpose *
-                </label>
-                <select
-                  value={recordHeader.purpose}
-                  onChange={(e) =>
-                    setRecordHeader({ ...recordHeader, purpose: e.target.value as OutgoingPurpose })
-                  }
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                >
-                  {PURPOSES.map((pur) => (
-                    <option key={pur} value={pur}>
-                      {pur}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Warehouse *
-                </label>
-                <select
-                  value={recordHeader.warehouse}
-                  onChange={(e) =>
-                    setRecordHeader({ ...recordHeader, warehouse: e.target.value as Location })
-                  }
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                >
-                  {LOCATIONS.map((loc) => (
-                    <option key={loc} value={loc}>
-                      {loc}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Issued By *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={recordHeader.issuedBy}
-                  onChange={(e) => setRecordHeader({ ...recordHeader, issuedBy: e.target.value })}
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                />
               </div>
             </div>
+
+            {dispatchType === "Finished Product" ? (
+              <>
+                <div className="space-y-1">
+                  <label className="text-[12px] font-medium">Select Customer</label>
+                  <select
+                    value={customerName}
+                    onChange={(e) => setCustomerName(e.target.value)}
+                    className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                  >
+                    {INITIAL_CUSTOMERS.map((c) => (
+                      <option key={c.id} value={c.customerName}>
+                        {c.customerCode} — {c.customerName} ({c.city})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[12px] font-medium">Select Finished Product</label>
+                  <select
+                    value={selectedFpId}
+                    onChange={(e) => setSelectedFpId(e.target.value)}
+                    className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                  >
+                    {store.finishedProducts.map((fp) => (
+                      <option key={fp.id} value={fp.id}>
+                        {fp.sku} — {fp.productName} ({fp.variantName}) — Available: {fp.currentStock}{" "}
+                        pairs
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-1">
+                  <label className="text-[12px] font-medium">Select Raw Material</label>
+                  <select
+                    value={selectedRmId}
+                    onChange={(e) => setSelectedRmId(e.target.value)}
+                    className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                  >
+                    {store.rawMaterials.map((rm) => (
+                      <option key={rm.id} value={rm.id}>
+                        {rm.itemCode} — {rm.itemName} — Available: {rm.currentStock} {rm.unit}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[12px] font-medium">Transaction Purpose</label>
+                  <select
+                    value={purpose}
+                    onChange={(e) => setPurpose(e.target.value)}
+                    className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                  >
+                    <option value="Production">Production</option>
+                    <option value="Internal Transfer">Internal Transfer</option>
+                    <option value="Sample">Sample</option>
+                    <option value="Damaged">Damaged</option>
+                    <option value="Return">Return</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+              </>
+            )}
 
             <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Reference Number (WO / Order No)
-                </label>
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Quantity Requested</label>
                 <input
-                  type="text"
-                  placeholder="e.g. WO-2026-441"
-                  value={recordHeader.referenceNumber}
-                  onChange={(e) =>
-                    setRecordHeader({ ...recordHeader, referenceNumber: e.target.value })
-                  }
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
+                  type="number"
+                  required
+                  min="1"
+                  value={quantity}
+                  onChange={(e) => setQuantity(e.target.value)}
+                  className={`h-8 w-full rounded-sm border bg-background px-2.5 text-[13px] font-bold ${
+                    isInsufficientStock ? "border-destructive text-destructive" : "border-input"
+                  }`}
                 />
               </div>
 
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Notes / Remarks
-                </label>
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Available Stock</label>
                 <input
                   type="text"
-                  placeholder="Dispatch vehicle, batch target..."
-                  value={recordHeader.notes}
-                  onChange={(e) => setRecordHeader({ ...recordHeader, notes: e.target.value })}
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
+                  disabled
+                  value={`${availableStock} ${
+                    dispatchType === "Finished Product" ? "pairs" : selectedRmItem?.unit || "units"
+                  }`}
+                  className="h-8 w-full rounded-sm border border-input bg-accent/50 px-2.5 text-[13px] font-bold text-muted-foreground"
                 />
               </div>
             </div>
 
-            {/* Line Items Section */}
-            <div className="space-y-2 pt-2 border-t border-border">
-              <div className="flex items-center justify-between">
-                <p className="text-[12px] font-semibold uppercase tracking-wide text-foreground">
-                  Items to Issue
-                </p>
-                <button
-                  type="button"
-                  onClick={handleAddLineItem}
-                  className="inline-flex items-center gap-1 text-[12px] font-medium text-primary hover:underline"
-                >
-                  <Plus size={13} /> Add Item
-                </button>
-              </div>
-
-              <div className="rounded-sm border border-border bg-card overflow-hidden">
-                <table className="w-full text-left text-[12px]">
-                  <thead>
-                    <tr className="border-b border-border bg-muted/40 text-[11px] uppercase tracking-wide text-muted-foreground">
-                      <th className="px-3 py-2 font-semibold">Item</th>
-                      <th className="px-3 py-2 text-right font-semibold w-28">Available Stock</th>
-                      <th className="px-3 py-2 text-right font-semibold w-28">Issue Qty</th>
-                      <th className="px-3 py-2 font-semibold w-16">Unit</th>
-                      <th className="px-3 py-2 text-right font-semibold w-24">Rate (₹)</th>
-                      <th className="px-3 py-2 text-right font-semibold w-28">Total (₹)</th>
-                      <th className="px-2 py-2 w-8"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {lineItems.map((line, idx) => {
-                      const isOverStock = (Number(line.quantity) || 0) > line.availableStock;
-                      const isInvalidQty = (Number(line.quantity) || 0) <= 0;
-
-                      return (
-                        <tr
-                          key={idx}
-                          className={`border-b border-border last:border-0 ${
-                            isOverStock ? "bg-destructive/5" : ""
-                          }`}
-                        >
-                          <td className="p-2">
-                            <select
-                              value={line.itemId}
-                              onChange={(e) => handleLineItemChange(idx, "itemId", e.target.value)}
-                              className="h-8 w-full rounded-sm border border-input bg-background px-2 text-[12px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                            >
-                              {inventory.map((inv) => (
-                                <option key={inv.id} value={inv.id}>
-                                  {inv.itemCode} — {inv.itemName}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-
-                          <td className="p-2 text-right">
-                            <span className="inline-flex items-center justify-end font-semibold tabular-nums text-foreground px-2 py-1 bg-muted/50 rounded-xs text-[11px]">
-                              {line.availableStock.toLocaleString()} {line.unit}
-                            </span>
-                          </td>
-
-                          <td className="p-2">
-                            <input
-                              type="number"
-                              min="1"
-                              max={line.availableStock}
-                              step="any"
-                              value={line.quantity}
-                              onChange={(e) =>
-                                handleLineItemChange(
-                                  idx,
-                                  "quantity",
-                                  parseFloat(e.target.value) || 0,
-                                )
-                              }
-                              className={`h-8 w-full text-right rounded-sm border px-2 text-[12px] tabular-nums focus:outline-none ${
-                                isOverStock
-                                  ? "border-destructive text-destructive font-semibold focus:ring-destructive/30"
-                                  : "border-input bg-background text-foreground focus:ring-ring/30"
-                              }`}
-                            />
-                            {isOverStock && (
-                              <p className="mt-0.5 text-[10px] text-destructive font-medium flex items-center justify-end gap-1">
-                                <AlertCircle size={10} /> Insufficient stock available.
-                              </p>
-                            )}
-                          </td>
-
-                          <td className="p-2">
-                            <input
-                              type="text"
-                              readOnly
-                              value={line.unit}
-                              className="h-8 w-full rounded-sm border border-input bg-muted px-2 text-[12px] text-muted-foreground cursor-not-allowed"
-                            />
-                          </td>
-
-                          <td className="p-2">
-                            <input
-                              type="number"
-                              min="0"
-                              step="any"
-                              value={line.rate}
-                              onChange={(e) =>
-                                handleLineItemChange(idx, "rate", parseFloat(e.target.value) || 0)
-                              }
-                              className="h-8 w-full text-right rounded-sm border border-input bg-background px-2 text-[12px] tabular-nums text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                            />
-                          </td>
-
-                          <td className="p-2 text-right font-semibold tabular-nums text-foreground">
-                            ₹{line.total.toLocaleString()}
-                          </td>
-
-                          <td className="p-2 text-center">
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveLineItem(idx)}
-                              className="text-muted-foreground hover:text-destructive transition-colors p-1"
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* Totals Summary */}
-            <div className="rounded-sm border border-border bg-muted/20 p-3 text-[12px] flex items-center justify-between">
-              <div>
-                <span className="text-muted-foreground">Total Items: </span>
-                <span className="font-semibold text-foreground">{lineItems.length}</span>
-                <span className="text-muted-foreground ml-4">Total Issue Quantity: </span>
-                <span className="font-semibold tabular-nums text-foreground">
-                  {totalQuantity.toLocaleString()}
+            {/* STOCK VALIDATION WARNING */}
+            {isInsufficientStock && (
+              <div className="rounded-sm border border-destructive/30 bg-destructive/10 p-2.5 text-destructive flex items-center gap-2 text-[12px]">
+                <AlertTriangle size={15} />
+                <span>
+                  <strong>Insufficient finished product stock.</strong> Requested {requestedQty},
+                  but only {availableStock} available in inventory.
                 </span>
               </div>
+            )}
 
-              <div>
-                <span className="text-muted-foreground">Total Value: </span>
-                <span className="text-base font-semibold tabular-nums text-primary ml-1">
-                  ₹{totalValue.toLocaleString()}
-                </span>
-              </div>
+            <div className="space-y-1">
+              <label className="text-[12px] font-medium">Reference Number (SO / Invoice)</label>
+              <input
+                type="text"
+                value={referenceNumber}
+                onChange={(e) => setReferenceNumber(e.target.value)}
+                className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+              />
             </div>
 
-            <DialogFooter className="pt-3">
+            <DialogFooter className="pt-2">
               <button
                 type="button"
-                onClick={() => setIsRecordOpen(false)}
-                className="h-8 rounded-sm border border-input bg-background px-3 text-[13px] font-medium text-foreground hover:bg-accent transition-colors"
+                onClick={() => setIsNewDispatchOpen(false)}
+                className="rounded-sm border border-input bg-background px-3 py-1.5 text-[13px]"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                disabled={hasInsufficientStock}
-                className="h-8 rounded-sm bg-primary px-4 text-[13px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                disabled={isInsufficientStock}
+                className="rounded-sm bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
               >
-                Save Outgoing
+                Confirm Dispatch
               </button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
-
-      {/* ------------------------- View Outgoing Modal ------------------------ */}
-      {viewingEntry && (
-        <Dialog open={!!viewingEntry} onOpenChange={(open) => !open && setViewingEntry(null)}>
-          <DialogContent className="sm:max-w-lg">
-            <DialogHeader>
-              <div className="flex items-center justify-between">
-                <DialogTitle className="text-base font-semibold font-mono text-foreground">
-                  {viewingEntry.issueNumber}
-                </DialogTitle>
-                <OutgoingStatusBadge status={viewingEntry.status} />
-              </div>
-              <DialogDescription className="text-[13px]">
-                Stock Dispatch Voucher — {viewingEntry.destination} ({viewingEntry.purpose})
-              </DialogDescription>
-            </DialogHeader>
-
-            <div className="space-y-3 py-2 text-[13px]">
-              {/* Info Grid */}
-              <div className="grid grid-cols-2 gap-2 rounded-sm border border-border bg-muted/20 p-3 text-[12px]">
-                <div>
-                  <p className="text-[10px] text-muted-foreground uppercase font-medium">
-                    Issue Date
-                  </p>
-                  <p className="font-medium text-foreground">{viewingEntry.date}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-muted-foreground uppercase font-medium">
-                    Reference No.
-                  </p>
-                  <p className="font-medium text-foreground">
-                    {viewingEntry.referenceNumber || "—"}
-                  </p>
-                </div>
-                <div className="mt-1">
-                  <p className="text-[10px] text-muted-foreground uppercase font-medium">
-                    Warehouse
-                  </p>
-                  <p className="font-medium text-foreground">{viewingEntry.warehouse}</p>
-                </div>
-                <div className="mt-1">
-                  <p className="text-[10px] text-muted-foreground uppercase font-medium">
-                    Issued By
-                  </p>
-                  <p className="font-medium text-foreground">{viewingEntry.issuedBy}</p>
-                </div>
-              </div>
-
-              {/* Items Table */}
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">
-                  Items Issued ({viewingEntry.items.length})
-                </p>
-                <div className="rounded-sm border border-border overflow-hidden">
-                  <table className="w-full text-left text-[12px]">
-                    <thead>
-                      <tr className="border-b border-border bg-muted/40 text-[10px] uppercase tracking-wide text-muted-foreground">
-                        <th className="px-3 py-2 font-semibold">Item</th>
-                        <th className="px-3 py-2 text-right font-semibold">Issued Qty</th>
-                        <th className="px-3 py-2 text-right font-semibold">Rate</th>
-                        <th className="px-3 py-2 text-right font-semibold">Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {viewingEntry.items.map((item, idx) => (
-                        <tr key={idx} className="border-b border-border last:border-0">
-                          <td className="px-3 py-2 font-medium text-foreground">
-                            <span className="font-mono text-[11px] text-muted-foreground mr-1.5">
-                              {item.itemCode}
-                            </span>
-                            {item.itemName}
-                          </td>
-                          <td className="px-3 py-2 text-right tabular-nums text-foreground">
-                            {item.quantity.toLocaleString()} {item.unit}
-                          </td>
-                          <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                            ₹{item.rate.toLocaleString()}
-                          </td>
-                          <td className="px-3 py-2 text-right font-semibold tabular-nums text-foreground">
-                            ₹{item.total.toLocaleString()}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Totals Summary */}
-              <div className="rounded-sm border border-border bg-card p-3 space-y-1 text-[12px]">
-                <div className="flex items-center justify-between text-muted-foreground">
-                  <span>Total Quantity Issued</span>
-                  <span className="font-semibold tabular-nums text-foreground">
-                    {viewingEntry.quantityDisplay}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between border-t border-border pt-1.5 text-[13px] font-semibold text-foreground">
-                  <span>Total Dispatch Value</span>
-                  <span className="tabular-nums text-primary">
-                    ₹{viewingEntry.totalValue.toLocaleString()}
-                  </span>
-                </div>
-              </div>
-
-              {viewingEntry.notes && (
-                <div>
-                  <p className="text-[11px] text-muted-foreground uppercase font-medium">Notes</p>
-                  <p className="mt-0.5 rounded-sm border border-border bg-background p-2 text-[12px] text-foreground">
-                    {viewingEntry.notes}
-                  </p>
-                </div>
-              )}
-            </div>
-
-            <DialogFooter>
-              <button
-                type="button"
-                onClick={() => setViewingEntry(null)}
-                className="h-8 rounded-sm border border-input bg-background px-4 text-[13px] font-medium text-foreground hover:bg-accent transition-colors"
-              >
-                Close
-              </button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
     </AppLayout>
   );
 }

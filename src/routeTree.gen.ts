@@ -14,6 +14,7 @@ import { Route as CustomersRouteImport } from './routes/customers'
 import { Route as IncomingRouteImport } from './routes/incoming'
 import { Route as InventoryRouteImport } from './routes/inventory'
 import { Route as OutgoingRouteImport } from './routes/outgoing'
+import { Route as ProductionRouteImport } from './routes/production'
 import { Route as ReportsRouteImport } from './routes/reports'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as StockMovementsRouteImport } from './routes/stock-movements'
@@ -44,6 +45,11 @@ const OutgoingRoute = OutgoingRouteImport.update({
   path: '/outgoing',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProductionRoute = ProductionRouteImport.update({
+  id: '/production',
+  path: '/production',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ReportsRoute = ReportsRouteImport.update({
   id: '/reports',
   path: '/reports',
@@ -71,6 +77,7 @@ export interface FileRoutesByFullPath {
   '/incoming': typeof IncomingRoute
   '/inventory': typeof InventoryRoute
   '/outgoing': typeof OutgoingRoute
+  '/production': typeof ProductionRoute
   '/reports': typeof ReportsRoute
   '/settings': typeof SettingsRoute
   '/stock-movements': typeof StockMovementsRoute
@@ -82,6 +89,7 @@ export interface FileRoutesByTo {
   '/incoming': typeof IncomingRoute
   '/inventory': typeof InventoryRoute
   '/outgoing': typeof OutgoingRoute
+  '/production': typeof ProductionRoute
   '/reports': typeof ReportsRoute
   '/settings': typeof SettingsRoute
   '/stock-movements': typeof StockMovementsRoute
@@ -94,6 +102,7 @@ export interface FileRoutesById {
   '/incoming': typeof IncomingRoute
   '/inventory': typeof InventoryRoute
   '/outgoing': typeof OutgoingRoute
+  '/production': typeof ProductionRoute
   '/reports': typeof ReportsRoute
   '/settings': typeof SettingsRoute
   '/stock-movements': typeof StockMovementsRoute
@@ -107,6 +116,7 @@ export interface FileRouteTypes {
     | '/incoming'
     | '/inventory'
     | '/outgoing'
+    | '/production'
     | '/reports'
     | '/settings'
     | '/stock-movements'
@@ -118,6 +128,7 @@ export interface FileRouteTypes {
     | '/incoming'
     | '/inventory'
     | '/outgoing'
+    | '/production'
     | '/reports'
     | '/settings'
     | '/stock-movements'
@@ -129,6 +140,7 @@ export interface FileRouteTypes {
     | '/incoming'
     | '/inventory'
     | '/outgoing'
+    | '/production'
     | '/reports'
     | '/settings'
     | '/stock-movements'
@@ -141,6 +153,7 @@ export interface RootRouteChildren {
   IncomingRoute: typeof IncomingRoute
   InventoryRoute: typeof InventoryRoute
   OutgoingRoute: typeof OutgoingRoute
+  ProductionRoute: typeof ProductionRoute
   ReportsRoute: typeof ReportsRoute
   SettingsRoute: typeof SettingsRoute
   StockMovementsRoute: typeof StockMovementsRoute
@@ -184,6 +197,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OutgoingRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/production': {
+      id: '/production'
+      path: '/production'
+      fullPath: '/production'
+      preLoaderRoute: typeof ProductionRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/reports': {
       id: '/reports'
       path: '/reports'
@@ -221,6 +241,7 @@ const rootRouteChildren: RootRouteChildren = {
   IncomingRoute: IncomingRoute,
   InventoryRoute: InventoryRoute,
   OutgoingRoute: OutgoingRoute,
+  ProductionRoute: ProductionRoute,
   ReportsRoute: ReportsRoute,
   SettingsRoute: SettingsRoute,
   StockMovementsRoute: StockMovementsRoute,

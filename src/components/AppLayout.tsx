@@ -6,25 +6,88 @@ import {
   Bell,
   Boxes,
   ChevronDown,
+  ChevronRight,
+  ClipboardList,
+  Factory,
   FileBarChart2,
+  FolderKanban,
+  Layers,
   LayoutDashboard,
+  PackageCheck,
+  PackageSearch,
   Search,
   Settings,
+  ShoppingCart,
   Truck,
   Users,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
-const NAV_ITEMS = [
-  { label: "Dashboard", icon: LayoutDashboard, href: "/" },
-  { label: "Inventory", icon: Boxes, href: "/inventory" },
-  { label: "Incoming", icon: ArrowDownToLine, href: "/incoming" },
-  { label: "Outgoing", icon: ArrowUpFromLine, href: "/outgoing" },
-  { label: "Stock Movements", icon: ArrowLeftRight, href: "/stock-movements" },
-  { label: "Suppliers", icon: Truck, href: "/suppliers" },
-  { label: "Customers", icon: Users, href: "/customers" },
-  { label: "Reports", icon: FileBarChart2, href: "/reports" },
-  { label: "Settings", icon: Settings, href: "/settings" },
+interface NavGroup {
+  label: string;
+  icon: any;
+  href?: string;
+  subItems?: { label: string; href: string; search?: Record<string, string> }[];
+}
+
+const NAV_GROUPS: NavGroup[] = [
+  {
+    label: "Dashboard",
+    icon: LayoutDashboard,
+    href: "/",
+  },
+  {
+    label: "Inventory",
+    icon: Boxes,
+    href: "/inventory",
+    subItems: [
+      { label: "Raw Materials", href: "/inventory", search: { tab: "raw-materials" } },
+      { label: "Components & Accessories", href: "/inventory", search: { tab: "components" } },
+      { label: "Work in Progress", href: "/inventory", search: { tab: "wip" } },
+      { label: "Finished Products", href: "/inventory", search: { tab: "finished" } },
+      { label: "Stock Movements", href: "/stock-movements" },
+      { label: "Stock Adjustment", href: "/inventory", search: { tab: "adjustment" } },
+      { label: "Stock Transfer", href: "/inventory", search: { tab: "transfer" } },
+    ],
+  },
+  {
+    label: "Purchasing",
+    icon: ShoppingCart,
+    subItems: [
+      { label: "Incoming Stock", href: "/incoming" },
+      { label: "Suppliers", href: "/suppliers" },
+    ],
+  },
+  {
+    label: "Production",
+    icon: Factory,
+    href: "/production",
+    subItems: [
+      { label: "Products", href: "/production", search: { tab: "products" } },
+      { label: "Bill of Materials", href: "/production", search: { tab: "bom" } },
+      { label: "Production Orders", href: "/production", search: { tab: "orders" } },
+      { label: "Production History", href: "/production", search: { tab: "history" } },
+      { label: "Wastage", href: "/production", search: { tab: "wastage" } },
+    ],
+  },
+  {
+    label: "Sales / Dispatch",
+    icon: ArrowUpFromLine,
+    subItems: [
+      { label: "Customers", href: "/customers" },
+      { label: "Outgoing / Dispatch", href: "/outgoing" },
+    ],
+  },
+  {
+    label: "Reports",
+    icon: FileBarChart2,
+    href: "/reports",
+  },
+  {
+    label: "Settings",
+    icon: Settings,
+    href: "/settings",
+  },
 ];
 
 interface AppLayoutProps {
@@ -35,64 +98,137 @@ interface AppLayoutProps {
 
 export function AppLayout({
   children,
-  headerTitle = "Inventory Dashboard",
+  headerTitle = "Factory Management System",
   headerRightContent,
 }: AppLayoutProps) {
   const routerState = useRouterState();
   const currentPath = routerState.location.pathname;
+  const currentSearch = routerState.location.searchStr || "";
+
+  // Auto-expand sections that match current path
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
+    Inventory: currentPath.startsWith("/inventory") || currentPath.startsWith("/stock-movements"),
+    Purchasing: currentPath.startsWith("/incoming") || currentPath.startsWith("/suppliers"),
+    Production: currentPath.startsWith("/production"),
+    "Sales / Dispatch": currentPath.startsWith("/customers") || currentPath.startsWith("/outgoing"),
+  });
+
+  const toggleSection = (label: string) => {
+    setOpenSections((prev) => ({ ...prev, [label]: !prev[label] }));
+  };
 
   return (
     <div className="flex min-h-screen bg-background text-foreground font-sans">
       {/* Sidebar */}
-      <aside className="hidden w-56 shrink-0 flex-col border-r border-border bg-card md:flex">
+      <aside className="hidden w-60 shrink-0 flex-col border-r border-border bg-card md:flex">
         <Link
           to="/"
-          className="flex items-center gap-2.5 border-b border-border px-4 py-4 hover:bg-accent/50 transition-colors"
+          className="flex items-center gap-2.5 border-b border-border px-4 py-3.5 hover:bg-accent/50 transition-colors"
         >
           <div className="flex h-7 w-7 items-center justify-center rounded-sm bg-primary text-[11px] font-bold text-primary-foreground">
             LF
           </div>
           <div className="leading-tight">
             <p className="text-[13px] font-semibold text-foreground">Leather Factory</p>
-            <p className="text-[11px] text-muted-foreground">Inventory System</p>
+            <p className="text-[11px] text-muted-foreground">Manufacturing & Inventory</p>
           </div>
         </Link>
-        <nav className="flex-1 space-y-0.5 px-2 py-3">
-          {NAV_ITEMS.map(({ label, icon: Icon, href }) => {
-            const isActive =
-              href !== "#" && (href === "/" ? currentPath === "/" : currentPath.startsWith(href));
 
-            if (href === "#") {
+        <nav className="flex-1 space-y-1 overflow-y-auto px-2 py-3">
+          {NAV_GROUPS.map((group) => {
+            const Icon = group.icon;
+            const hasSub = Boolean(group.subItems && group.subItems.length > 0);
+            const isOpen = openSections[group.label];
+
+            // Check parent active status
+            const isGroupActive =
+              group.href && group.href === "/"
+                ? currentPath === "/"
+                : group.subItems
+                  ? group.subItems.some((s) => currentPath.startsWith(s.href))
+                  : group.href
+                    ? currentPath.startsWith(group.href)
+                    : false;
+
+            if (!hasSub) {
               return (
-                <span
-                  key={label}
-                  className="flex cursor-not-allowed items-center gap-2.5 rounded-sm px-2.5 py-1.5 text-[13px] text-muted-foreground/60 hover:bg-transparent"
-                  title="Coming soon"
+                <Link
+                  key={group.label}
+                  to={group.href!}
+                  className={`flex items-center gap-2.5 rounded-sm px-2.5 py-1.5 text-[13px] transition-colors ${
+                    isGroupActive
+                      ? "bg-primary/10 font-medium text-primary"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                  }`}
                 >
                   <Icon size={15} strokeWidth={1.8} />
-                  {label}
-                </span>
+                  <span>{group.label}</span>
+                </Link>
               );
             }
 
             return (
-              <Link
-                key={label}
-                to={href}
-                className={`flex items-center gap-2.5 rounded-sm px-2.5 py-1.5 text-[13px] transition-colors ${
-                  isActive
-                    ? "bg-primary/10 font-medium text-primary"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                }`}
-              >
-                <Icon size={15} strokeWidth={1.8} />
-                {label}
-              </Link>
+              <div key={group.label} className="space-y-0.5">
+                <button
+                  type="button"
+                  onClick={() => toggleSection(group.label)}
+                  className={`flex w-full items-center justify-between rounded-sm px-2.5 py-1.5 text-[13px] transition-colors ${
+                    isGroupActive
+                      ? "bg-primary/5 font-medium text-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                  }`}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Icon size={15} strokeWidth={1.8} />
+                    <span>{group.label}</span>
+                  </span>
+                  <ChevronRight
+                    size={14}
+                    className={`text-muted-foreground transition-transform duration-150 ${
+                      isOpen ? "rotate-90" : ""
+                    }`}
+                  />
+                </button>
+
+                {isOpen && group.subItems && (
+                  <div className="ml-5 space-y-0.5 border-l border-border/60 pl-2">
+                    {group.subItems.map((sub) => {
+                      let isSubActive = false;
+
+                      if (sub.search?.tab) {
+                        isSubActive =
+                          currentPath === sub.href && currentSearch.includes(`tab=${sub.search.tab}`);
+                      } else {
+                        isSubActive =
+                          currentPath === sub.href &&
+                          (!currentSearch || !currentSearch.includes("tab="));
+                      }
+
+                      return (
+                        <Link
+                          key={sub.label}
+                          to={sub.href}
+                          search={sub.search}
+                          className={`block rounded-sm px-2 py-1 text-[12px] transition-colors ${
+                            isSubActive
+                              ? "bg-primary/10 font-semibold text-primary"
+                              : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                          }`}
+                        >
+                          {sub.label}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             );
           })}
         </nav>
+
         <div className="border-t border-border px-4 py-3">
-          <p className="text-[11px] text-muted-foreground">Unit 4 — Chennai Plant</p>
+          <p className="text-[11px] font-medium text-foreground">Unit 4 — Chennai Factory</p>
+          <p className="text-[10px] text-muted-foreground">Finished Product Tannery & Workshop</p>
         </div>
       </aside>
 
@@ -110,7 +246,7 @@ export function AppLayout({
                 />
                 <input
                   type="search"
-                  placeholder="Search items, references…"
+                  placeholder="Search materials, products, orders…"
                   className="h-8 w-64 rounded-sm border border-input bg-background pl-8 pr-3 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
                 />
               </label>
@@ -144,3 +280,4 @@ export function AppLayout({
     </div>
   );
 }
+

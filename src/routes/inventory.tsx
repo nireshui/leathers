@@ -1,29 +1,37 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import {
-  Plus,
-  Search,
-  MoreVertical,
-  Eye,
-  Pencil,
-  FilterX,
-  Package,
-  CheckCircle2,
   AlertTriangle,
+  ArrowLeftRight,
+  Boxes,
+  CheckCircle2,
+  ChevronRight,
+  ClipboardList,
+  Eye,
+  FilterX,
+  Layers,
+  Package,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Search,
   XCircle,
 } from "lucide-react";
 import { AppLayout } from "../components/AppLayout";
 import {
-  CATEGORIES,
-  INITIAL_INVENTORY_ITEMS,
-  LOCATIONS,
-  STATUSES,
-  calculateStockStatus,
-  type Category,
-  type InventoryItem,
-  type Location,
-  type StockStatus,
-} from "../lib/inventoryData";
+  executeStockAdjustment,
+  executeStockTransfer,
+  saveComponent,
+  saveFinishedProduct,
+  saveRawMaterial,
+  useFactoryStore,
+  type ComponentItem,
+  type FinishedProductItem,
+  type LeatherType,
+  type RawMaterialGrade,
+  type RawMaterialItem,
+} from "../lib/factoryStore";
+import { LOCATIONS, type Location } from "../lib/inventoryData";
 import {
   Dialog,
   DialogContent,
@@ -32,47 +40,53 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "../components/ui/dropdown-menu";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/inventory")({
   head: () => ({
     meta: [
-      { title: "Inventory — Leather Factory" },
+      { title: "Categorized Inventory — Leather Factory" },
       {
         name: "description",
         content:
-          "Current stock position for Leather Factory raw materials, chemicals, accessories, hardware, and finished goods.",
+          "Manage Raw Materials, Components & Accessories, Work In Progress (WIP), Finished Products, Stock Adjustments, and Transfers.",
       },
     ],
   }),
   component: InventoryPage,
 });
 
-/* -------------------------------- Badges -------------------------------- */
+type InventoryTab =
+  | "raw-materials"
+  | "components"
+  | "wip"
+  | "finished"
+  | "movements"
+  | "adjustment"
+  | "transfer";
 
-function StatusBadge({ status }: { status: StockStatus }) {
-  const styles = {
+function StatusBadge({ status }: { status: string }) {
+  const styles: Record<string, string> = {
     "In Stock": "bg-success/10 text-success border-success/20",
     "Low Stock": "bg-warning/10 text-warning border-warning/20",
     "Out of Stock": "bg-destructive/10 text-destructive border-destructive/20",
-  }[status];
+    "In Production": "bg-primary/10 text-primary border-primary/20",
+    Completed: "bg-success/10 text-success border-success/20",
+  };
 
   const Icon = {
     "In Stock": CheckCircle2,
     "Low Stock": AlertTriangle,
     "Out of Stock": XCircle,
-  }[status];
+    "In Production": Boxes,
+    Completed: CheckCircle2,
+  }[status] || Package;
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-sm border px-2 py-0.5 text-[11px] font-medium leading-4 ${styles}`}
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-sm border px-2 py-0.5 text-[11px] font-medium leading-4 ${
+        styles[status] || "bg-secondary text-secondary-foreground"
+      }`}
     >
       <Icon size={12} strokeWidth={2} />
       {status}
@@ -80,794 +94,1087 @@ function StatusBadge({ status }: { status: StockStatus }) {
   );
 }
 
-/* -------------------------------- Main Page ------------------------------- */
-
 function InventoryPage() {
-  const [items, setItems] = useState<InventoryItem[]>(INITIAL_INVENTORY_ITEMS);
+  const store = useFactoryStore();
 
-  // Filters state
+  // Tab detection from search string
+  const searchStr = typeof window !== "undefined" ? window.location.search : "";
+  const initialTab: InventoryTab = searchStr.includes("tab=components")
+    ? "components"
+    : searchStr.includes("tab=wip")
+      ? "wip"
+      : searchStr.includes("tab=finished")
+        ? "finished"
+        : searchStr.includes("tab=movements")
+          ? "movements"
+          : searchStr.includes("tab=adjustment")
+            ? "adjustment"
+            : searchStr.includes("tab=transfer")
+              ? "transfer"
+              : "raw-materials";
+
+  const [activeTab, setActiveTab] = useState<InventoryTab>(initialTab);
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedCategory, setSelectedCategory] = useState<string>("all");
-  const [selectedStatus, setSelectedStatus] = useState<string>("all");
   const [selectedLocation, setSelectedLocation] = useState<string>("all");
 
-  // Dialog states
-  const [isAddOpen, setIsAddOpen] = useState(false);
-  const [viewingItem, setViewingItem] = useState<InventoryItem | null>(null);
-  const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
+  // Dialog States
+  const [isAddRMOpen, setIsAddRMOpen] = useState(false);
+  const [isAddCmpOpen, setIsAddCmpOpen] = useState(false);
+  const [isAddFpOpen, setIsAddFpOpen] = useState(false);
+  const [isTransferOpen, setIsTransferOpen] = useState(false);
+  const [isAdjustmentOpen, setIsAdjustmentOpen] = useState(false);
 
-  // New item form state
-  const [newItem, setNewItem] = useState<{
+  // Transfer Form State
+  const [transferForm, setTransferForm] = useState({
+    itemId: store.rawMaterials[0]?.id || "",
+    category: "Raw Material",
+    quantity: "50",
+    fromLocation: "Main Warehouse" as Location,
+    toLocation: "Production Store" as Location,
+    reason: "Issued to shop floor",
+  });
+
+  // Adjustment Form State
+  const [adjustmentForm, setAdjustmentForm] = useState({
+    itemId: store.rawMaterials[0]?.id || "",
+    category: "Raw Material",
+    systemStock: store.rawMaterials[0]?.currentStock || 0,
+    physicalStock: (store.rawMaterials[0]?.currentStock || 0).toString(),
+    reason: "Physical Count" as const,
+    notes: "",
+  });
+
+  // New Raw Material Form State
+  const [newRM, setNewRM] = useState<{
     itemCode: string;
     itemName: string;
-    category: Category;
+    leatherType: LeatherType;
+    grade: RawMaterialGrade;
+    color: string;
+    thickness: string;
     unit: string;
     currentStock: string;
     minStock: string;
     location: Location;
+    averageCost: string;
     description: string;
   }>({
     itemCode: "",
     itemName: "",
-    category: "Raw Leather",
+    leatherType: "Cow Leather",
+    grade: "Grade A",
+    color: "Black",
+    thickness: "1.2 - 1.4 mm",
     unit: "Sq.ft",
-    currentStock: "",
-    minStock: "",
-    location: "Warehouse A",
+    currentStock: "1000",
+    minStock: "300",
+    location: "Main Warehouse",
+    averageCost: "110",
     description: "",
   });
 
-  // Calculate summary figures based on initial reference counts adjusted for user items
-  const summary = useMemo(() => {
-    // Base ERP metrics requested: Total 124, In Stock 108, Low/Out 16
-    // We adjust dynamically relative to changes in the current list
-    const addedCount = items.length - INITIAL_INVENTORY_ITEMS.length;
+  // New Component Form State
+  const [newCmp, setNewCmp] = useState<{
+    itemCode: string;
+    itemName: string;
+    category: "Component" | "Accessory";
+    unit: string;
+    currentStock: string;
+    minStock: string;
+    location: Location;
+    cost: string;
+    supplierName: string;
+    description: string;
+  }>({
+    itemCode: "",
+    itemName: "",
+    category: "Component",
+    unit: "Piece",
+    currentStock: "500",
+    minStock: "100",
+    location: "Production Store",
+    cost: "50",
+    supplierName: "Precision Hardware Co",
+    description: "",
+  });
 
-    let inStockCount = 108;
-    let lowOrOutCount = 16;
+  // New Finished Product Form State
+  const [newFp, setNewFp] = useState<{
+    sku: string;
+    productName: string;
+    productType: FinishedProductItem["productType"];
+    variantName: string;
+    size: string;
+    color: string;
+    material: string;
+    currentStock: string;
+    minStock: string;
+    sellingPrice: string;
+    productionCost: string;
+    location: Location;
+    description: string;
+  }>({
+    sku: "",
+    productName: "",
+    productType: "Shoes",
+    variantName: "Black / Size 8",
+    size: "8",
+    color: "Black",
+    material: "Full Grain Cow Leather",
+    currentStock: "50",
+    minStock: "15",
+    sellingPrice: "3800",
+    productionCost: "1850",
+    location: "Finished Goods",
+    description: "",
+  });
 
-    items.forEach((item, idx) => {
-      if (idx >= INITIAL_INVENTORY_ITEMS.length) {
-        if (item.status === "In Stock") inStockCount++;
-        else lowOrOutCount++;
-      }
-    });
-
-    const totalItems = 124 + addedCount;
+  /* -------------------------------------------------------------------------- */
+  /* COMPUTED METRICS                                                           */
+  /* -------------------------------------------------------------------------- */
+  const metrics = useMemo(() => {
+    const totalRMStock = store.rawMaterials.reduce((a, b) => a + b.currentStock, 0);
+    const lowRMCount = store.rawMaterials.filter((m) => m.status === "Low Stock" || m.status === "Out of Stock").length;
+    const totalCmpStock = store.components.reduce((a, b) => a + b.currentStock, 0);
+    const totalWipCount = store.wipItems.reduce((a, b) => a + b.quantity, 0);
+    const totalFpStock = store.finishedProducts.reduce((a, b) => a + b.currentStock, 0);
 
     return {
-      totalItems,
-      inStock: inStockCount,
-      lowOrOut: lowOrOutCount,
+      totalRMStock,
+      lowRMCount,
+      totalCmpStock,
+      totalWipCount,
+      totalFpStock,
     };
-  }, [items]);
+  }, [store]);
 
-  // Filtered items for table
-  const filteredItems = useMemo(() => {
-    return items.filter((item) => {
-      const q = searchQuery.trim().toLowerCase();
-      const matchesSearch =
-        !q ||
-        item.itemCode.toLowerCase().includes(q) ||
-        item.itemName.toLowerCase().includes(q) ||
-        item.category.toLowerCase().includes(q) ||
-        item.location.toLowerCase().includes(q);
+  /* -------------------------------------------------------------------------- */
+  /* FORM SUBMIT HANDLERS                                                       */
+  /* -------------------------------------------------------------------------- */
 
-      const matchesCategory = selectedCategory === "all" || item.category === selectedCategory;
-
-      const matchesStatus = selectedStatus === "all" || item.status === selectedStatus;
-
-      const matchesLocation = selectedLocation === "all" || item.location === selectedLocation;
-
-      return matchesSearch && matchesCategory && matchesStatus && matchesLocation;
-    });
-  }, [items, searchQuery, selectedCategory, selectedStatus, selectedLocation]);
-
-  const hasActiveFilters =
-    searchQuery.trim() !== "" ||
-    selectedCategory !== "all" ||
-    selectedStatus !== "all" ||
-    selectedLocation !== "all";
-
-  const clearFilters = () => {
-    setSearchQuery("");
-    setSelectedCategory("all");
-    setSelectedStatus("all");
-    setSelectedLocation("all");
-  };
-
-  // Add Item Handler
-  const handleAddItemSubmit = (e: React.FormEvent) => {
+  const handleAddRM = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newItem.itemCode || !newItem.itemName) {
-      toast.error("Please fill in Item Code and Item Name.");
+    if (!newRM.itemName || !newRM.currentStock) {
+      toast.error("Please enter material name and current stock.");
       return;
     }
 
-    const currentStockNum = parseFloat(newItem.currentStock) || 0;
-    const minStockNum = parseFloat(newItem.minStock) || 0;
-    const computedStatus = calculateStockStatus(currentStockNum, minStockNum);
-
-    const created: InventoryItem = {
-      id: `item-${Date.now()}`,
-      itemCode: newItem.itemCode.trim().toUpperCase(),
-      itemName: newItem.itemName.trim(),
-      category: newItem.category,
-      unit: newItem.unit.trim() || "Units",
-      currentStock: currentStockNum,
-      minStock: minStockNum,
-      status: computedStatus,
-      location: newItem.location,
-      description: newItem.description.trim() || undefined,
-      lastUpdated: "Just now",
-    };
-
-    setItems((prev) => [created, ...prev]);
-    setIsAddOpen(false);
-    toast.success(`Item ${created.itemCode} (${created.itemName}) added successfully.`);
-
-    // Reset form
-    setNewItem({
-      itemCode: "",
-      itemName: "",
-      category: "Raw Leather",
-      unit: "Sq.ft",
-      currentStock: "",
-      minStock: "",
-      location: "Warehouse A",
-      description: "",
+    saveRawMaterial({
+      itemCode: newRM.itemCode || `RM-${Math.floor(1000 + Math.random() * 9000)}`,
+      itemName: newRM.itemName,
+      leatherType: newRM.leatherType,
+      grade: newRM.grade,
+      color: newRM.color,
+      thickness: newRM.thickness,
+      unit: newRM.unit,
+      currentStock: parseFloat(newRM.currentStock) || 0,
+      minStock: parseFloat(newRM.minStock) || 100,
+      location: newRM.location,
+      averageCost: parseFloat(newRM.averageCost) || 100,
+      description: newRM.description,
     });
+
+    toast.success(`Raw material ${newRM.itemName} saved.`);
+    setIsAddRMOpen(false);
   };
 
-  // Edit Item Handler
-  const handleEditItemSubmit = (e: React.FormEvent) => {
+  const handleAddCmp = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingItem) return;
+    if (!newCmp.itemName || !newCmp.currentStock) {
+      toast.error("Please enter component name and stock.");
+      return;
+    }
 
-    const computedStatus = calculateStockStatus(editingItem.currentStock, editingItem.minStock);
+    saveComponent({
+      itemCode: newCmp.itemCode || `CMP-${Math.floor(1000 + Math.random() * 9000)}`,
+      itemName: newCmp.itemName,
+      category: newCmp.category,
+      unit: newCmp.unit,
+      currentStock: parseFloat(newCmp.currentStock) || 0,
+      minStock: parseFloat(newCmp.minStock) || 50,
+      location: newCmp.location,
+      cost: parseFloat(newCmp.cost) || 50,
+      supplierName: newCmp.supplierName,
+      description: newCmp.description,
+    });
 
-    const updatedItem: InventoryItem = {
-      ...editingItem,
-      status: computedStatus,
-      lastUpdated: "Just now",
-    };
+    toast.success(`Component ${newCmp.itemName} saved.`);
+    setIsAddCmpOpen(false);
+  };
 
-    setItems((prev) => prev.map((i) => (i.id === updatedItem.id ? updatedItem : i)));
-    setEditingItem(null);
-    toast.success(`Item ${updatedItem.itemCode} updated successfully.`);
+  const handleAddFp = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newFp.productName || !newFp.currentStock) {
+      toast.error("Please enter product name and stock.");
+      return;
+    }
+
+    saveFinishedProduct({
+      sku: newFp.sku || `SKU-${Math.floor(10000 + Math.random() * 90000)}`,
+      productName: newFp.productName,
+      productType: newFp.productType,
+      variantName: newFp.variantName,
+      size: newFp.size,
+      color: newFp.color,
+      material: newFp.material,
+      currentStock: parseInt(newFp.currentStock, 10) || 0,
+      minStock: parseInt(newFp.minStock, 10) || 15,
+      sellingPrice: parseFloat(newFp.sellingPrice) || 2000,
+      productionCost: parseFloat(newFp.productionCost) || 1000,
+      location: newFp.location,
+      description: newFp.description,
+    });
+
+    toast.success(`Finished product ${newFp.productName} saved.`);
+    setIsAddFpOpen(false);
+  };
+
+  const handleTransferSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const item =
+      store.rawMaterials.find((m) => m.id === transferForm.itemId) ||
+      store.components.find((c) => c.id === transferForm.itemId);
+
+    if (!item) return;
+
+    const qty = parseFloat(transferForm.quantity) || 0;
+    if (qty <= 0) {
+      toast.error("Enter a valid transfer quantity.");
+      return;
+    }
+
+    const res = executeStockTransfer({
+      itemId: item.id,
+      itemCode: item.itemCode,
+      itemName: item.itemName,
+      category: item.category,
+      quantity: qty,
+      unit: item.unit,
+      fromLocation: transferForm.fromLocation,
+      toLocation: transferForm.toLocation,
+      reason: transferForm.reason,
+    });
+
+    if (res.success) {
+      toast.success(res.message);
+      setIsTransferOpen(false);
+    }
+  };
+
+  const handleAdjustmentSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const item =
+      store.rawMaterials.find((m) => m.id === adjustmentForm.itemId) ||
+      store.components.find((c) => c.id === adjustmentForm.itemId) ||
+      store.finishedProducts.find((f) => f.id === adjustmentForm.itemId);
+
+    if (!item) return;
+
+    const phys = parseFloat(adjustmentForm.physicalStock);
+    if (isNaN(phys)) {
+      toast.error("Enter a valid physical stock number.");
+      return;
+    }
+
+    const itemCode = "itemCode" in item ? item.itemCode : (item as any).sku;
+
+    const res = executeStockAdjustment({
+      itemId: item.id,
+      itemCode,
+      itemName: item.itemName,
+      category: item.category,
+      systemStock: item.currentStock,
+      physicalStock: phys,
+      unit: item.unit || "Unit",
+      reason: adjustmentForm.reason,
+      notes: adjustmentForm.notes,
+    });
+
+    if (res.success) {
+      toast.success(res.message);
+      setIsAdjustmentOpen(false);
+    }
   };
 
   return (
-    <AppLayout
-      headerTitle="Inventory"
-      headerRightContent={
-        <div className="flex items-center gap-3">
-          <label className="relative hidden sm:block">
-            <Search
-              size={14}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-            />
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search inventory…"
-              className="h-8 w-56 rounded-sm border border-input bg-background pl-8 pr-3 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/30 transition-all"
-            />
-          </label>
+    <AppLayout headerTitle="Categorized Inventory Management">
+      {/* Header Bar */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight text-foreground">
+            Factory Inventory Categories
+          </h1>
+          <p className="text-[13px] text-muted-foreground">
+            Raw materials, components, WIP, finished goods, movements, and stock reconciliations.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {activeTab === "raw-materials" && (
+            <button
+              type="button"
+              onClick={() => setIsAddRMOpen(true)}
+              className="flex items-center gap-1.5 rounded-sm bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              <Plus size={15} />
+              Add Raw Material
+            </button>
+          )}
+
+          {activeTab === "components" && (
+            <button
+              type="button"
+              onClick={() => setIsAddCmpOpen(true)}
+              className="flex items-center gap-1.5 rounded-sm bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              <Plus size={15} />
+              Add Component
+            </button>
+          )}
+
+          {activeTab === "finished" && (
+            <button
+              type="button"
+              onClick={() => setIsAddFpOpen(true)}
+              className="flex items-center gap-1.5 rounded-sm bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              <Plus size={15} />
+              Add Finished Product
+            </button>
+          )}
+
           <button
             type="button"
-            onClick={() => setIsAddOpen(true)}
-            className="inline-flex h-8 items-center gap-1.5 rounded-sm bg-primary px-3 text-[13px] font-medium text-primary-foreground shadow-xs hover:bg-primary/90 transition-colors"
+            onClick={() => setIsTransferOpen(true)}
+            className="flex items-center gap-1.5 rounded-sm border border-input bg-background px-3 py-1.5 text-[13px] font-medium hover:bg-accent"
           >
-            <Plus size={15} strokeWidth={2} />
-            Add Item
+            <ArrowLeftRight size={15} />
+            Stock Transfer
           </button>
-        </div>
-      }
-    >
-      {/* 3 Summary Cards */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <div className="rounded-md border border-border bg-card px-4 py-3.5">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Total Items
-          </p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums leading-7 text-foreground">
-            {summary.totalItems}
-          </p>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
-            Across all categories & locations
-          </p>
-        </div>
 
-        <div className="rounded-md border border-border bg-card px-4 py-3.5">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            In Stock
-          </p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums leading-7 text-foreground">
-            {summary.inStock}
-          </p>
-          <p className="mt-0.5 text-[11px] text-success">Adequate stock levels</p>
-        </div>
-
-        <div className="rounded-md border border-border bg-card px-4 py-3.5">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Low / Out of Stock
-          </p>
-          <p className="mt-1.5 text-2xl font-semibold tabular-nums leading-7 text-warning">
-            {summary.lowOrOut}
-          </p>
-          <p className="mt-0.5 text-[11px] text-warning">Requires attention or reorder</p>
+          <button
+            type="button"
+            onClick={() => setIsAdjustmentOpen(true)}
+            className="flex items-center gap-1.5 rounded-sm border border-input bg-background px-3 py-1.5 text-[13px] font-medium hover:bg-accent"
+          >
+            <RotateCcw size={15} />
+            Stock Adjustment
+          </button>
         </div>
       </div>
 
-      {/* Filter Row & Inventory Table */}
-      <section className="rounded-md border border-border bg-card">
-        {/* Filters Header */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
-          <div className="flex flex-wrap items-center gap-2.5">
-            {/* Search Input (Mobile or integrated) */}
-            <div className="relative">
-              <Search
-                size={14}
-                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-              />
-              <input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search..."
-                className="h-8 w-44 rounded-sm border border-input bg-background pl-8 pr-3 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-              />
-            </div>
-
-            {/* Category Filter */}
-            <select
-              value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
-              className="h-8 rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-            >
-              <option value="all">All Categories</option>
-              {CATEGORIES.map((cat) => (
-                <option key={cat} value={cat}>
-                  {cat}
-                </option>
-              ))}
-            </select>
-
-            {/* Status Filter */}
-            <select
-              value={selectedStatus}
-              onChange={(e) => setSelectedStatus(e.target.value)}
-              className="h-8 rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-            >
-              <option value="all">All Statuses</option>
-              {STATUSES.map((st) => (
-                <option key={st} value={st}>
-                  {st}
-                </option>
-              ))}
-            </select>
-
-            {/* Location Filter */}
-            <select
-              value={selectedLocation}
-              onChange={(e) => setSelectedLocation(e.target.value)}
-              className="h-8 rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-            >
-              <option value="all">All Locations</option>
-              {LOCATIONS.map((loc) => (
-                <option key={loc} value={loc}>
-                  {loc}
-                </option>
-              ))}
-            </select>
-
-            {hasActiveFilters && (
-              <button
-                type="button"
-                onClick={clearFilters}
-                className="inline-flex h-8 items-center gap-1.5 rounded-sm px-2 text-[12px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-              >
-                <FilterX size={13} />
-                Clear
-              </button>
-            )}
-          </div>
-
-          <div className="text-[12px] text-muted-foreground">
-            Showing <span className="font-semibold text-foreground">{filteredItems.length}</span>{" "}
-            items
-          </div>
+      {/* KPI Summary Cards */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="rounded-md border border-border bg-card px-4 py-3">
+          <p className="text-[11px] font-medium uppercase text-muted-foreground">
+            Raw Material Stock
+          </p>
+          <p className="mt-1 text-2xl font-bold tabular-nums text-foreground">
+            {metrics.totalRMStock.toLocaleString()}{" "}
+            <span className="text-[13px] font-normal text-muted-foreground">Sq.ft</span>
+          </p>
+          <p className="text-[11px] text-muted-foreground">Across {store.rawMaterials.length} leather types</p>
         </div>
 
-        {/* Inventory Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-[13px]">
+        <div className="rounded-md border border-border bg-card px-4 py-3">
+          <p className="text-[11px] font-medium uppercase text-muted-foreground">
+            Components & Hardware
+          </p>
+          <p className="mt-1 text-2xl font-bold tabular-nums text-foreground">
+            {metrics.totalCmpStock.toLocaleString()}{" "}
+            <span className="text-[13px] font-normal text-muted-foreground">units</span>
+          </p>
+          <p className="text-[11px] text-muted-foreground">{store.components.length} accessory items</p>
+        </div>
+
+        <div className="rounded-md border border-border bg-card px-4 py-3">
+          <p className="text-[11px] font-medium uppercase text-muted-foreground">
+            Work In Progress (WIP)
+          </p>
+          <p className="mt-1 text-2xl font-bold tabular-nums text-foreground">
+            {metrics.totalWipCount.toLocaleString()}{" "}
+            <span className="text-[13px] font-normal text-muted-foreground">units</span>
+          </p>
+          <p className="text-[11px] text-muted-foreground">Active on shop floor</p>
+        </div>
+
+        <div className="rounded-md border border-border bg-card px-4 py-3">
+          <p className="text-[11px] font-medium uppercase text-muted-foreground">
+            Finished Goods Stock
+          </p>
+          <p className="mt-1 text-2xl font-bold tabular-nums text-foreground">
+            {metrics.totalFpStock.toLocaleString()}{" "}
+            <span className="text-[13px] font-normal text-muted-foreground">pairs/pcs</span>
+          </p>
+          <p className="text-[11px] text-muted-foreground">Ready for customer dispatch</p>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="border-b border-border">
+        <div className="flex space-x-6 overflow-x-auto">
+          {[
+            { id: "raw-materials", label: `Raw Materials (${store.rawMaterials.length})` },
+            { id: "components", label: `Components & Accessories (${store.components.length})` },
+            { id: "wip", label: `Work in Progress (${store.wipItems.length})` },
+            { id: "finished", label: `Finished Products (${store.finishedProducts.length})` },
+            { id: "movements", label: `Stock Movements (${store.stockMovements.length})` },
+            { id: "adjustment", label: `Adjustments (${store.stockAdjustments.length})` },
+            { id: "transfer", label: `Transfers (${store.stockTransfers.length})` },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id as InventoryTab)}
+              className={`whitespace-nowrap border-b-2 py-2.5 text-[13px] font-medium transition-colors ${
+                activeTab === tab.id
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* SEARCH / FILTERS */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="relative flex-1 max-w-sm">
+          <Search
+            size={14}
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
+          <input
+            type="search"
+            placeholder="Search code, name, location…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="h-8 w-full rounded-sm border border-input bg-background pl-8 pr-3 text-[13px] focus:outline-none focus:ring-2 focus:ring-ring/30"
+          />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <select
+            value={selectedLocation}
+            onChange={(e) => setSelectedLocation(e.target.value)}
+            className="h-8 rounded-sm border border-input bg-background px-2.5 text-[12px]"
+          >
+            <option value="all">All Locations</option>
+            {LOCATIONS.map((loc) => (
+              <option key={loc} value={loc}>
+                {loc}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* ====================================================================== */}
+      {/* TAB 1: RAW MATERIALS INVENTORY                                         */}
+      {/* ====================================================================== */}
+      {activeTab === "raw-materials" && (
+        <div className="rounded-md border border-border bg-card overflow-hidden">
+          <table className="w-full text-[13px]">
             <thead>
-              <tr className="border-b border-border bg-muted/30 text-[11px] uppercase tracking-wide text-muted-foreground">
-                <th className="px-4 py-2.5 font-semibold">Item Code</th>
-                <th className="px-4 py-2.5 font-semibold">Item Name</th>
-                <th className="px-4 py-2.5 font-semibold">Category</th>
-                <th className="px-4 py-2.5 font-semibold">Unit</th>
-                <th className="px-4 py-2.5 text-right font-semibold">Current Stock</th>
-                <th className="px-4 py-2.5 text-right font-semibold">Min. Stock</th>
-                <th className="px-4 py-2.5 font-semibold">Status</th>
-                <th className="px-4 py-2.5 font-semibold">Location</th>
-                <th className="px-4 py-2.5 text-right font-semibold">Action</th>
+              <tr className="border-b border-border bg-accent/20 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <th className="px-4 py-2.5 font-medium">Item Code</th>
+                <th className="px-4 py-2.5 font-medium">Material Name</th>
+                <th className="px-4 py-2.5 font-medium">Leather Type & Grade</th>
+                <th className="px-4 py-2.5 font-medium">Color / Thickness</th>
+                <th className="px-4 py-2.5 text-right font-medium">Current Stock</th>
+                <th className="px-4 py-2.5 text-right font-medium">Min Stock</th>
+                <th className="px-4 py-2.5 text-right font-medium">Avg Cost</th>
+                <th className="px-4 py-2.5 font-medium">Location</th>
+                <th className="px-4 py-2.5 font-medium">Status</th>
               </tr>
             </thead>
             <tbody>
-              {filteredItems.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">
-                    <div className="flex flex-col items-center justify-center gap-1.5">
-                      <Package size={24} className="text-muted-foreground/50" />
-                      <p className="text-[13px] font-medium">
-                        No items found matching your filters.
-                      </p>
-                      {hasActiveFilters && (
-                        <button
-                          type="button"
-                          onClick={clearFilters}
-                          className="mt-1 text-[12px] font-medium text-primary hover:underline"
-                        >
-                          Clear filters
-                        </button>
+              {store.rawMaterials
+                .filter(
+                  (m) =>
+                    (!searchQuery ||
+                      m.itemName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                      m.itemCode.toLowerCase().includes(searchQuery.toLowerCase())) &&
+                    (selectedLocation === "all" || m.location === selectedLocation)
+                )
+                .map((rm) => (
+                  <tr key={rm.id} className="border-b border-border hover:bg-accent/40">
+                    <td className="px-4 py-2.5 font-mono font-semibold text-foreground">
+                      {rm.itemCode}
+                    </td>
+                    <td className="px-4 py-2.5 font-medium text-foreground">
+                      {rm.itemName}
+                      {rm.batchLot && (
+                        <p className="text-[10px] text-muted-foreground">Lot: {rm.batchLot}</p>
                       )}
-                    </div>
-                  </td>
-                </tr>
-              ) : (
-                filteredItems.map((item) => (
-                  <tr
-                    key={item.id}
-                    className="border-b border-border last:border-0 hover:bg-accent/50 transition-colors"
-                  >
-                    <td className="whitespace-nowrap px-4 py-3 font-mono font-medium text-foreground">
-                      {item.itemCode}
                     </td>
-                    <td className="px-4 py-3 font-medium text-foreground">{item.itemName}</td>
-                    <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
-                      {item.category}
+                    <td className="px-4 py-2.5">
+                      <span className="font-medium text-foreground">{rm.leatherType}</span>
+                      <span className="ml-1 text-[11px] text-muted-foreground">({rm.grade})</span>
                     </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
-                      {item.unit}
+                    <td className="px-4 py-2.5 text-muted-foreground">
+                      {rm.color} / {rm.thickness}
                     </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right font-semibold tabular-nums text-foreground">
-                      {item.currentStock.toLocaleString()}
+                    <td className="px-4 py-2.5 text-right font-bold tabular-nums text-foreground">
+                      {rm.currentStock.toLocaleString()} {rm.unit}
                     </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-muted-foreground">
-                      {item.minStock.toLocaleString()}
+                    <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">
+                      {rm.minStock} {rm.unit}
                     </td>
-                    <td className="whitespace-nowrap px-4 py-3">
-                      <StatusBadge status={item.status} />
+                    <td className="px-4 py-2.5 text-right tabular-nums font-medium text-foreground">
+                      ₹{rm.averageCost}
                     </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
-                      {item.location}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right">
-                      <div className="inline-flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setViewingItem(item)}
-                          title="View Details"
-                          className="rounded-sm p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-                        >
-                          <Eye size={14} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEditingItem(item)}
-                          title="Edit Item"
-                          className="rounded-sm p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-                        >
-                          <Pencil size={14} />
-                        </button>
-
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <button
-                              type="button"
-                              className="rounded-sm p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-                            >
-                              <MoreVertical size={14} />
-                            </button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" className="w-36">
-                            <DropdownMenuItem onClick={() => setViewingItem(item)}>
-                              <Eye className="mr-2 size-3.5" /> View Details
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => setEditingItem(item)}>
-                              <Pencil className="mr-2 size-3.5" /> Edit Position
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                              className="text-destructive focus:bg-destructive/10 focus:text-destructive"
-                              onClick={() => {
-                                setItems((prev) => prev.filter((i) => i.id !== item.id));
-                                toast.success(`Item ${item.itemCode} removed.`);
-                              }}
-                            >
-                              Remove Item
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
+                    <td className="px-4 py-2.5 text-muted-foreground">{rm.location}</td>
+                    <td className="px-4 py-2.5">
+                      <StatusBadge status={rm.status} />
                     </td>
                   </tr>
-                ))
-              )}
+                ))}
             </tbody>
           </table>
         </div>
-      </section>
+      )}
 
-      {/* --------------------------- Add Item Modal --------------------------- */}
-      <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
-        <DialogContent className="sm:max-w-md">
+      {/* ====================================================================== */}
+      {/* TAB 2: COMPONENTS & ACCESSORIES                                        */}
+      {/* ====================================================================== */}
+      {activeTab === "components" && (
+        <div className="rounded-md border border-border bg-card overflow-hidden">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-border bg-accent/20 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <th className="px-4 py-2.5 font-medium">Item Code</th>
+                <th className="px-4 py-2.5 font-medium">Component / Accessory</th>
+                <th className="px-4 py-2.5 font-medium">Category</th>
+                <th className="px-4 py-2.5 text-right font-medium">Current Stock</th>
+                <th className="px-4 py-2.5 text-right font-medium">Min Stock</th>
+                <th className="px-4 py-2.5 text-right font-medium">Cost / Unit</th>
+                <th className="px-4 py-2.5 font-medium">Supplier</th>
+                <th className="px-4 py-2.5 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {store.components
+                .filter(
+                  (c) =>
+                    (!searchQuery ||
+                      c.itemName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                      c.itemCode.toLowerCase().includes(searchQuery.toLowerCase())) &&
+                    (selectedLocation === "all" || c.location === selectedLocation)
+                )
+                .map((cmp) => (
+                  <tr key={cmp.id} className="border-b border-border hover:bg-accent/40">
+                    <td className="px-4 py-2.5 font-mono font-semibold text-foreground">
+                      {cmp.itemCode}
+                    </td>
+                    <td className="px-4 py-2.5 font-medium text-foreground">{cmp.itemName}</td>
+                    <td className="px-4 py-2.5 text-muted-foreground">{cmp.category}</td>
+                    <td className="px-4 py-2.5 text-right font-bold tabular-nums text-foreground">
+                      {cmp.currentStock.toLocaleString()} {cmp.unit}
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">
+                      {cmp.minStock} {cmp.unit}
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums font-medium text-foreground">
+                      ₹{cmp.cost}
+                    </td>
+                    <td className="px-4 py-2.5 text-muted-foreground">
+                      {cmp.supplierName || "Default Supplier"}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <StatusBadge status={cmp.status} />
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ====================================================================== */}
+      {/* TAB 3: WORK IN PROGRESS (WIP)                                          */}
+      {/* ====================================================================== */}
+      {activeTab === "wip" && (
+        <div className="rounded-md border border-border bg-card overflow-hidden">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-border bg-accent/20 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <th className="px-4 py-2.5 font-medium">WIP Code</th>
+                <th className="px-4 py-2.5 font-medium">Product & Variant</th>
+                <th className="px-4 py-2.5 font-medium">Production Order</th>
+                <th className="px-4 py-2.5 font-medium">Manufacturing Stage</th>
+                <th className="px-4 py-2.5 text-right font-medium">Batch Qty</th>
+                <th className="px-4 py-2.5 text-right font-medium">Progress</th>
+                <th className="px-4 py-2.5 font-medium">Location</th>
+                <th className="px-4 py-2.5 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {store.wipItems.map((wip) => (
+                <tr key={wip.id} className="border-b border-border hover:bg-accent/40">
+                  <td className="px-4 py-2.5 font-mono font-semibold text-foreground">
+                    {wip.wipCode}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <p className="font-medium text-foreground">{wip.productName}</p>
+                    <p className="text-[11px] text-muted-foreground">{wip.variantName}</p>
+                  </td>
+                  <td className="px-4 py-2.5 font-mono text-muted-foreground">
+                    {wip.productionOrderNumber}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className="inline-flex items-center gap-1 rounded-sm bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary">
+                      {wip.stage}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-right font-bold tabular-nums text-foreground">
+                    {wip.quantity} {wip.unit}
+                  </td>
+                  <td className="px-4 py-2.5 text-right tabular-nums font-medium text-muted-foreground">
+                    {wip.completedQuantity} / {wip.quantity} ({Math.round((wip.completedQuantity / wip.quantity) * 100)}%)
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{wip.currentLocation}</td>
+                  <td className="px-4 py-2.5">
+                    <StatusBadge status={wip.status} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ====================================================================== */}
+      {/* TAB 4: FINISHED PRODUCTS                                               */}
+      {/* ====================================================================== */}
+      {activeTab === "finished" && (
+        <div className="rounded-md border border-border bg-card overflow-hidden">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-border bg-accent/20 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <th className="px-4 py-2.5 font-medium">SKU</th>
+                <th className="px-4 py-2.5 font-medium">Product Name</th>
+                <th className="px-4 py-2.5 font-medium">Type</th>
+                <th className="px-4 py-2.5 font-medium">Variant (Size/Color)</th>
+                <th className="px-4 py-2.5 text-right font-medium">Current Stock</th>
+                <th className="px-4 py-2.5 text-right font-medium">Min Stock</th>
+                <th className="px-4 py-2.5 text-right font-medium">Selling Price</th>
+                <th className="px-4 py-2.5 text-right font-medium">Prod Cost</th>
+                <th className="px-4 py-2.5 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {store.finishedProducts
+                .filter(
+                  (fp) =>
+                    !searchQuery ||
+                    fp.productName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                    fp.sku.toLowerCase().includes(searchQuery.toLowerCase())
+                )
+                .map((fp) => (
+                  <tr key={fp.id} className="border-b border-border hover:bg-accent/40">
+                    <td className="px-4 py-2.5 font-mono font-semibold text-foreground">{fp.sku}</td>
+                    <td className="px-4 py-2.5 font-medium text-foreground">{fp.productName}</td>
+                    <td className="px-4 py-2.5 text-muted-foreground">{fp.productType}</td>
+                    <td className="px-4 py-2.5 text-muted-foreground">{fp.variantName}</td>
+                    <td className="px-4 py-2.5 text-right font-bold tabular-nums text-foreground">
+                      {fp.currentStock} pairs
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">
+                      {fp.minStock} pairs
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums font-bold text-foreground">
+                      ₹{fp.sellingPrice.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">
+                      ₹{fp.productionCost.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <StatusBadge status={fp.status} />
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ====================================================================== */}
+      {/* TAB 5: STOCK MOVEMENTS LEDGER                                          */}
+      {/* ====================================================================== */}
+      {activeTab === "movements" && (
+        <div className="rounded-md border border-border bg-card overflow-hidden">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-border bg-accent/20 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <th className="px-4 py-2.5 font-medium">Date & Time</th>
+                <th className="px-4 py-2.5 font-medium">Movement ID</th>
+                <th className="px-4 py-2.5 font-medium">Item / Product</th>
+                <th className="px-4 py-2.5 font-medium">Category</th>
+                <th className="px-4 py-2.5 font-medium">Movement Type</th>
+                <th className="px-4 py-2.5 text-right font-medium">Quantity</th>
+                <th className="px-4 py-2.5 text-right font-medium">New Balance</th>
+                <th className="px-4 py-2.5 font-medium">Reference</th>
+              </tr>
+            </thead>
+            <tbody>
+              {store.stockMovements.map((mov) => (
+                <tr key={mov.id} className="border-b border-border hover:bg-accent/40">
+                  <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">
+                    {mov.dateTime || mov.date}
+                  </td>
+                  <td className="px-4 py-2.5 font-mono text-muted-foreground">{mov.movementId}</td>
+                  <td className="px-4 py-2.5 font-medium text-foreground">
+                    {mov.itemName}
+                    <span className="ml-1 text-[10px] text-muted-foreground">({mov.itemCode})</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{mov.category}</td>
+                  <td className="px-4 py-2.5">
+                    <span className="inline-flex items-center rounded-sm bg-secondary px-2 py-0.5 text-[11px] font-medium text-secondary-foreground">
+                      {mov.type}
+                    </span>
+                  </td>
+                  <td
+                    className={`px-4 py-2.5 text-right font-bold tabular-nums ${
+                      mov.quantity >= 0 ? "text-success" : "text-foreground"
+                    }`}
+                  >
+                    {mov.quantityDisplay}
+                  </td>
+                  <td className="px-4 py-2.5 text-right font-medium tabular-nums text-foreground">
+                    {mov.balanceDisplay}
+                  </td>
+                  <td className="px-4 py-2.5 font-mono text-muted-foreground">{mov.reference}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ====================================================================== */}
+      {/* TAB 6: STOCK ADJUSTMENT HISTORY                                        */}
+      {/* ====================================================================== */}
+      {activeTab === "adjustment" && (
+        <div className="rounded-md border border-border bg-card overflow-hidden">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-border bg-accent/20 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <th className="px-4 py-2.5 font-medium">Adjustment #</th>
+                <th className="px-4 py-2.5 font-medium">Date</th>
+                <th className="px-4 py-2.5 font-medium">Item Name</th>
+                <th className="px-4 py-2.5 text-right font-medium">System Stock</th>
+                <th className="px-4 py-2.5 text-right font-medium">Physical Stock</th>
+                <th className="px-4 py-2.5 text-right font-medium">Difference</th>
+                <th className="px-4 py-2.5 font-medium">Reason</th>
+                <th className="px-4 py-2.5 font-medium">User</th>
+              </tr>
+            </thead>
+            <tbody>
+              {store.stockAdjustments.map((adj) => (
+                <tr key={adj.id} className="border-b border-border hover:bg-accent/40">
+                  <td className="px-4 py-2.5 font-mono font-medium text-foreground">
+                    {adj.adjustmentNumber}
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{adj.date}</td>
+                  <td className="px-4 py-2.5 font-medium text-foreground">{adj.itemName}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">
+                    {adj.systemStock} {adj.unit}
+                  </td>
+                  <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-foreground">
+                    {adj.physicalStock} {adj.unit}
+                  </td>
+                  <td
+                    className={`px-4 py-2.5 text-right font-bold tabular-nums ${
+                      adj.difference >= 0 ? "text-success" : "text-destructive"
+                    }`}
+                  >
+                    {adj.difference >= 0 ? `+${adj.difference}` : adj.difference} {adj.unit}
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{adj.reason}</td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{adj.user}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ====================================================================== */}
+      {/* TAB 7: STOCK TRANSFER HISTORY                                          */}
+      {/* ====================================================================== */}
+      {activeTab === "transfer" && (
+        <div className="rounded-md border border-border bg-card overflow-hidden">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-border bg-accent/20 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <th className="px-4 py-2.5 font-medium">Transfer #</th>
+                <th className="px-4 py-2.5 font-medium">Date</th>
+                <th className="px-4 py-2.5 font-medium">Item</th>
+                <th className="px-4 py-2.5 text-right font-medium">Quantity</th>
+                <th className="px-4 py-2.5 font-medium">From Location</th>
+                <th className="px-4 py-2.5 font-medium">To Location</th>
+                <th className="px-4 py-2.5 font-medium">Reason</th>
+                <th className="px-4 py-2.5 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {store.stockTransfers.map((trf) => (
+                <tr key={trf.id} className="border-b border-border hover:bg-accent/40">
+                  <td className="px-4 py-2.5 font-mono font-medium text-foreground">
+                    {trf.transferNumber}
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{trf.date}</td>
+                  <td className="px-4 py-2.5 font-medium text-foreground">{trf.itemName}</td>
+                  <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-foreground">
+                    {trf.quantity} {trf.unit}
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{trf.fromLocation}</td>
+                  <td className="px-4 py-2.5 font-medium text-primary">{trf.toLocation}</td>
+                  <td className="px-4 py-2.5 text-muted-foreground">{trf.reason}</td>
+                  <td className="px-4 py-2.5">
+                    <StatusBadge status={trf.status} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ====================================================================== */}
+      {/* DIALOG 1: ADD RAW MATERIAL                                             */}
+      {/* ====================================================================== */}
+      <Dialog open={isAddRMOpen} onOpenChange={setIsAddRMOpen}>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle className="text-base font-semibold text-foreground">
-              Add New Item
-            </DialogTitle>
-            <DialogDescription className="text-[13px]">
-              Add a new inventory item to track current stock levels.
+            <DialogTitle>Add New Raw Material</DialogTitle>
+            <DialogDescription>
+              Register a raw leather hide or tanner skin batch into raw material inventory.
             </DialogDescription>
           </DialogHeader>
 
-          <form onSubmit={handleAddItemSubmit} className="space-y-3 py-2">
+          <form onSubmit={handleAddRM} className="space-y-3 text-[13px]">
             <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Item Code *
-                </label>
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Item Code</label>
                 <input
                   type="text"
-                  required
-                  placeholder="e.g. LF-005"
-                  value={newItem.itemCode}
-                  onChange={(e) => setNewItem({ ...newItem, itemCode: e.target.value })}
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
+                  placeholder="RM-LEATH-007"
+                  value={newRM.itemCode}
+                  onChange={(e) => setNewRM({ ...newRM, itemCode: e.target.value })}
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
                 />
               </div>
 
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Category *
-                </label>
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Leather Type</label>
                 <select
-                  value={newItem.category}
-                  onChange={(e) => setNewItem({ ...newItem, category: e.target.value as Category })}
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
+                  value={newRM.leatherType}
+                  onChange={(e) => setNewRM({ ...newRM, leatherType: e.target.value as LeatherType })}
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
                 >
-                  {CATEGORIES.map((cat) => (
-                    <option key={cat} value={cat}>
-                      {cat}
+                  <option value="Cow Leather">Cow Leather</option>
+                  <option value="Buffalo Leather">Buffalo Leather</option>
+                  <option value="Goat Leather">Goat Leather</option>
+                  <option value="Suede Leather">Suede Leather</option>
+                  <option value="Synthetic Leather">Synthetic Leather</option>
+                  <option value="PU Leather">PU Leather</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[12px] font-medium">Material Name</label>
+              <input
+                type="text"
+                required
+                placeholder="Full Grain Cowhide Crust - Cognac"
+                value={newRM.itemName}
+                onChange={(e) => setNewRM({ ...newRM, itemName: e.target.value })}
+                className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+              />
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Grade</label>
+                <select
+                  value={newRM.grade}
+                  onChange={(e) => setNewRM({ ...newRM, grade: e.target.value as RawMaterialGrade })}
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                >
+                  <option value="Grade A">Grade A</option>
+                  <option value="Grade B">Grade B</option>
+                  <option value="Grade C">Grade C</option>
+                  <option value="Premium">Premium</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Color</label>
+                <input
+                  type="text"
+                  value={newRM.color}
+                  onChange={(e) => setNewRM({ ...newRM, color: e.target.value })}
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Thickness</label>
+                <input
+                  type="text"
+                  value={newRM.thickness}
+                  onChange={(e) => setNewRM({ ...newRM, thickness: e.target.value })}
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Unit</label>
+                <select
+                  value={newRM.unit}
+                  onChange={(e) => setNewRM({ ...newRM, unit: e.target.value })}
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                >
+                  <option value="Sq.ft">Sq.ft</option>
+                  <option value="Sq.m">Sq.m</option>
+                  <option value="Kg">Kg</option>
+                  <option value="Meter">Meter</option>
+                  <option value="Roll">Roll</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Initial Stock</label>
+                <input
+                  type="number"
+                  required
+                  value={newRM.currentStock}
+                  onChange={(e) => setNewRM({ ...newRM, currentStock: e.target.value })}
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Min Stock Alert</label>
+                <input
+                  type="number"
+                  value={newRM.minStock}
+                  onChange={(e) => setNewRM({ ...newRM, minStock: e.target.value })}
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Average Cost (₹)</label>
+                <input
+                  type="number"
+                  value={newRM.averageCost}
+                  onChange={(e) => setNewRM({ ...newRM, averageCost: e.target.value })}
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">Warehouse Location</label>
+                <select
+                  value={newRM.location}
+                  onChange={(e) => setNewRM({ ...newRM, location: e.target.value as Location })}
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                >
+                  {LOCATIONS.map((loc) => (
+                    <option key={loc} value={loc}>
+                      {loc}
                     </option>
                   ))}
                 </select>
               </div>
             </div>
 
-            <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                Item Name *
-              </label>
-              <input
-                type="text"
-                required
-                placeholder="e.g. Nappa Calfskin"
-                value={newItem.itemName}
-                onChange={(e) => setNewItem({ ...newItem, itemName: e.target.value })}
-                className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-              />
-            </div>
-
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Unit *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Sq.ft / Kg"
-                  value={newItem.unit}
-                  onChange={(e) => setNewItem({ ...newItem, unit: e.target.value })}
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Current Stock
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  placeholder="0"
-                  value={newItem.currentStock}
-                  onChange={(e) => setNewItem({ ...newItem, currentStock: e.target.value })}
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Minimum Stock
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  placeholder="0"
-                  value={newItem.minStock}
-                  onChange={(e) => setNewItem({ ...newItem, minStock: e.target.value })}
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                Location *
-              </label>
-              <select
-                value={newItem.location}
-                onChange={(e) => setNewItem({ ...newItem, location: e.target.value as Location })}
-                className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-              >
-                {LOCATIONS.map((loc) => (
-                  <option key={loc} value={loc}>
-                    {loc}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                Description
-              </label>
-              <textarea
-                rows={2}
-                placeholder="Optional notes or specifications..."
-                value={newItem.description}
-                onChange={(e) => setNewItem({ ...newItem, description: e.target.value })}
-                className="mt-1 w-full rounded-sm border border-input bg-background p-2 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-              />
-            </div>
-
-            <DialogFooter className="pt-3">
+            <DialogFooter className="pt-2">
               <button
                 type="button"
-                onClick={() => setIsAddOpen(false)}
-                className="h-8 rounded-sm border border-input bg-background px-3 text-[13px] font-medium text-foreground hover:bg-accent transition-colors"
+                onClick={() => setIsAddRMOpen(false)}
+                className="rounded-sm border border-input bg-background px-3 py-1.5 text-[13px]"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                className="h-8 rounded-sm bg-primary px-4 text-[13px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                className="rounded-sm bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground hover:bg-primary/90"
               >
-                Add Item
+                Save Material
               </button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
 
-      {/* -------------------------- View Item Modal --------------------------- */}
-      {viewingItem && (
-        <Dialog open={!!viewingItem} onOpenChange={(open) => !open && setViewingItem(null)}>
-          <DialogContent className="sm:max-w-md">
-            <DialogHeader>
-              <div className="flex items-center justify-between">
-                <DialogTitle className="text-base font-semibold text-foreground">
-                  {viewingItem.itemCode}
-                </DialogTitle>
-                <StatusBadge status={viewingItem.status} />
-              </div>
-              <DialogDescription className="text-[13px]">{viewingItem.itemName}</DialogDescription>
-            </DialogHeader>
+      {/* ====================================================================== */}
+      {/* DIALOG 2: STOCK TRANSFER                                               */}
+      {/* ====================================================================== */}
+      <Dialog open={isTransferOpen} onOpenChange={setIsTransferOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Stock Transfer</DialogTitle>
+            <DialogDescription>
+              Move stock between warehouse, production store, and workshop units.
+            </DialogDescription>
+          </DialogHeader>
 
-            <div className="space-y-3 py-2 text-[13px]">
-              <div className="grid grid-cols-2 gap-2 rounded-sm border border-border bg-muted/20 p-3">
-                <div>
-                  <p className="text-[11px] text-muted-foreground uppercase font-medium">
-                    Category
-                  </p>
-                  <p className="font-medium text-foreground">{viewingItem.category}</p>
-                </div>
-                <div>
-                  <p className="text-[11px] text-muted-foreground uppercase font-medium">
-                    Location
-                  </p>
-                  <p className="font-medium text-foreground">{viewingItem.location}</p>
-                </div>
-                <div className="mt-2">
-                  <p className="text-[11px] text-muted-foreground uppercase font-medium">
-                    Current Stock
-                  </p>
-                  <p className="text-base font-semibold tabular-nums text-foreground">
-                    {viewingItem.currentStock.toLocaleString()} {viewingItem.unit}
-                  </p>
-                </div>
-                <div className="mt-2">
-                  <p className="text-[11px] text-muted-foreground uppercase font-medium">
-                    Min. Stock Threshold
-                  </p>
-                  <p className="text-base font-semibold tabular-nums text-muted-foreground">
-                    {viewingItem.minStock.toLocaleString()} {viewingItem.unit}
-                  </p>
-                </div>
-              </div>
-
-              {viewingItem.description && (
-                <div>
-                  <p className="text-[11px] text-muted-foreground uppercase font-medium">
-                    Description
-                  </p>
-                  <p className="mt-0.5 rounded-sm border border-border bg-background p-2.5 text-[12px] text-foreground">
-                    {viewingItem.description}
-                  </p>
-                </div>
-              )}
-
-              {viewingItem.lastUpdated && (
-                <div className="text-[11px] text-muted-foreground">
-                  Last updated: {viewingItem.lastUpdated}
-                </div>
-              )}
+          <form onSubmit={handleTransferSubmit} className="space-y-3 text-[13px]">
+            <div className="space-y-1">
+              <label className="text-[12px] font-medium">Item to Transfer</label>
+              <select
+                value={transferForm.itemId}
+                onChange={(e) => setTransferForm({ ...transferForm, itemId: e.target.value })}
+                className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+              >
+                <optgroup label="Raw Materials">
+                  {store.rawMaterials.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.itemCode} — {m.itemName} ({m.currentStock} {m.unit})
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Components">
+                  {store.components.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.itemCode} — {c.itemName} ({c.currentStock} {c.unit})
+                    </option>
+                  ))}
+                </optgroup>
+              </select>
             </div>
 
-            <DialogFooter>
-              <button
-                type="button"
-                onClick={() => setViewingItem(null)}
-                className="h-8 rounded-sm border border-input bg-background px-3 text-[13px] font-medium text-foreground hover:bg-accent transition-colors"
-              >
-                Close
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const target = viewingItem;
-                  setViewingItem(null);
-                  setEditingItem(target);
-                }}
-                className="h-8 rounded-sm bg-primary px-3 text-[13px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-              >
-                Edit Item
-              </button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
+            <div className="space-y-1">
+              <label className="text-[12px] font-medium">Quantity to Transfer</label>
+              <input
+                type="number"
+                required
+                min="1"
+                value={transferForm.quantity}
+                onChange={(e) => setTransferForm({ ...transferForm, quantity: e.target.value })}
+                className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+              />
+            </div>
 
-      {/* -------------------------- Edit Item Modal --------------------------- */}
-      {editingItem && (
-        <Dialog open={!!editingItem} onOpenChange={(open) => !open && setEditingItem(null)}>
-          <DialogContent className="sm:max-w-md">
-            <DialogHeader>
-              <DialogTitle className="text-base font-semibold text-foreground">
-                Edit Item Position
-              </DialogTitle>
-              <DialogDescription className="text-[13px]">
-                Update current stock or minimum stock threshold for {editingItem.itemCode}.
-              </DialogDescription>
-            </DialogHeader>
-
-            <form onSubmit={handleEditItemSubmit} className="space-y-3 py-2">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Item Code
-                  </label>
-                  <input
-                    type="text"
-                    disabled
-                    value={editingItem.itemCode}
-                    className="mt-1 h-8 w-full rounded-sm border border-input bg-muted px-2.5 text-[13px] text-muted-foreground cursor-not-allowed"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Category
-                  </label>
-                  <select
-                    value={editingItem.category}
-                    onChange={(e) =>
-                      setEditingItem({ ...editingItem, category: e.target.value as Category })
-                    }
-                    className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                  >
-                    {CATEGORIES.map((cat) => (
-                      <option key={cat} value={cat}>
-                        {cat}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Item Name
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={editingItem.itemName}
-                  onChange={(e) => setEditingItem({ ...editingItem, itemName: e.target.value })}
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                />
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Unit
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={editingItem.unit}
-                    onChange={(e) => setEditingItem({ ...editingItem, unit: e.target.value })}
-                    className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Current Stock
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={editingItem.currentStock}
-                    onChange={(e) =>
-                      setEditingItem({
-                        ...editingItem,
-                        currentStock: parseFloat(e.target.value) || 0,
-                      })
-                    }
-                    className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] font-semibold text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Min. Stock
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={editingItem.minStock}
-                    onChange={(e) =>
-                      setEditingItem({
-                        ...editingItem,
-                        minStock: parseFloat(e.target.value) || 0,
-                      })
-                    }
-                    className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Location
-                </label>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">From Location</label>
                 <select
-                  value={editingItem.location}
+                  value={transferForm.fromLocation}
                   onChange={(e) =>
-                    setEditingItem({ ...editingItem, location: e.target.value as Location })
+                    setTransferForm({ ...transferForm, fromLocation: e.target.value as Location })
                   }
-                  className="mt-1 h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
                 >
                   {LOCATIONS.map((loc) => (
                     <option key={loc} value={loc}>
@@ -877,37 +1184,186 @@ function InventoryPage() {
                 </select>
               </div>
 
-              <div>
-                <label className="block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Description
-                </label>
-                <textarea
-                  rows={2}
-                  value={editingItem.description || ""}
-                  onChange={(e) => setEditingItem({ ...editingItem, description: e.target.value })}
-                  className="mt-1 w-full rounded-sm border border-input bg-background p-2 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring/30"
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">To Location</label>
+                <select
+                  value={transferForm.toLocation}
+                  onChange={(e) =>
+                    setTransferForm({ ...transferForm, toLocation: e.target.value as Location })
+                  }
+                  className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+                >
+                  {LOCATIONS.map((loc) => (
+                    <option key={loc} value={loc}>
+                      {loc}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[12px] font-medium">Reason / Transfer Ref</label>
+              <input
+                type="text"
+                value={transferForm.reason}
+                onChange={(e) => setTransferForm({ ...transferForm, reason: e.target.value })}
+                className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+              />
+            </div>
+
+            <DialogFooter className="pt-2">
+              <button
+                type="button"
+                onClick={() => setIsTransferOpen(false)}
+                className="rounded-sm border border-input bg-background px-3 py-1.5 text-[13px]"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="rounded-sm bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                Execute Transfer
+              </button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* ====================================================================== */}
+      {/* DIALOG 3: STOCK ADJUSTMENT                                             */}
+      {/* ====================================================================== */}
+      <Dialog open={isAdjustmentOpen} onOpenChange={setIsAdjustmentOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Stock Audit Adjustment</DialogTitle>
+            <DialogDescription>
+              Reconcile physical stock count against system recorded balance.
+            </DialogDescription>
+          </DialogHeader>
+
+          <form onSubmit={handleAdjustmentSubmit} className="space-y-3 text-[13px]">
+            <div className="space-y-1">
+              <label className="text-[12px] font-medium">Item to Adjust</label>
+              <select
+                value={adjustmentForm.itemId}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  const item =
+                    store.rawMaterials.find((m) => m.id === id) ||
+                    store.components.find((c) => c.id === id) ||
+                    store.finishedProducts.find((f) => f.id === id);
+
+                  setAdjustmentForm({
+                    ...adjustmentForm,
+                    itemId: id,
+                    systemStock: item ? item.currentStock : 0,
+                    physicalStock: (item ? item.currentStock : 0).toString(),
+                  });
+                }}
+                className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+              >
+                <optgroup label="Raw Materials">
+                  {store.rawMaterials.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.itemCode} — {m.itemName}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Components">
+                  {store.components.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.itemCode} — {c.itemName}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Finished Products">
+                  {store.finishedProducts.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.sku} — {f.productName} ({f.variantName})
+                    </option>
+                  ))}
+                </optgroup>
+              </select>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium">System Record</label>
+                <input
+                  type="text"
+                  disabled
+                  value={adjustmentForm.systemStock}
+                  className="h-8 w-full rounded-sm border border-input bg-accent/50 px-2.5 text-[13px] text-muted-foreground"
                 />
               </div>
 
-              <DialogFooter className="pt-3">
-                <button
-                  type="button"
-                  onClick={() => setEditingItem(null)}
-                  className="h-8 rounded-sm border border-input bg-background px-3 text-[13px] font-medium text-foreground hover:bg-accent transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="h-8 rounded-sm bg-primary px-4 text-[13px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-                >
-                  Save Changes
-                </button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
-      )}
+              <div className="space-y-1">
+                <label className="text-[12px] font-medium font-semibold text-primary">
+                  Physical Audit Count
+                </label>
+                <input
+                  type="number"
+                  required
+                  value={adjustmentForm.physicalStock}
+                  onChange={(e) =>
+                    setAdjustmentForm({ ...adjustmentForm, physicalStock: e.target.value })
+                  }
+                  className="h-8 w-full rounded-sm border border-primary bg-background px-2.5 text-[13px] font-bold"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[12px] font-medium">Reason for Difference</label>
+              <select
+                value={adjustmentForm.reason}
+                onChange={(e) =>
+                  setAdjustmentForm({
+                    ...adjustmentForm,
+                    reason: e.target.value as any,
+                  })
+                }
+                className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+              >
+                <option value="Physical Count">Physical Count</option>
+                <option value="Damage">Damage</option>
+                <option value="Missing Stock">Missing Stock</option>
+                <option value="Data Correction">Data Correction</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[12px] font-medium">Notes</label>
+              <input
+                type="text"
+                placeholder="Audit reference or notes..."
+                value={adjustmentForm.notes}
+                onChange={(e) => setAdjustmentForm({ ...adjustmentForm, notes: e.target.value })}
+                className="h-8 w-full rounded-sm border border-input bg-background px-2.5 text-[13px]"
+              />
+            </div>
+
+            <DialogFooter className="pt-2">
+              <button
+                type="button"
+                onClick={() => setIsAdjustmentOpen(false)}
+                className="rounded-sm border border-input bg-background px-3 py-1.5 text-[13px]"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="rounded-sm bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                Save Stock Adjustment
+              </button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </AppLayout>
   );
 }
